@@ -1,6 +1,9 @@
+import { useMemo, useState } from 'react';
 import { Phone, PhoneIncoming, PhoneMissed, PhoneOutgoing, Video } from 'lucide-react';
+import { CHATTR_ASSETS } from '../lib/assets.ts';
 import type { CallLogItem, CallType, PublicUser } from '../types.ts';
 import { Avatar } from './Avatar.tsx';
+import { SafeImage } from './SafeImage.tsx';
 
 interface CallsViewProps {
   calls: CallLogItem[];
@@ -30,37 +33,75 @@ function formatTime(ts: number): string {
 }
 
 export function CallsView({ calls, onlineMap, onStartCall, onOpenChat }: CallsViewProps) {
+  const [filter, setFilter] = useState<'all' | 'missed'>('all');
+
+  const filteredCalls = useMemo(() => {
+    if (filter === 'missed') {
+      return calls.filter((c) => c.status === 'missed' || c.status === 'declined');
+    }
+    return calls;
+  }, [calls, filter]);
+
   return (
     <div className="flex-1 flex flex-col bg-[#FFFFFF] min-h-0">
-      <div className="px-6 py-5 border-b border-[#E6EBF0] flex items-center justify-between">
+      <div className="px-6 py-5 border-b border-[#E6EBF0] flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-xl font-semibold text-[#283747]">Call History</h1>
           <p className="text-sm text-[#5D6D7E] mt-0.5">
             Recent voice and video calls with friends
           </p>
         </div>
-        <span className="font-mono text-xs text-[#5D6D7E] tabular-nums">{calls.length} total</span>
+
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1 p-1 bg-[#F4F6F8] rounded-xl">
+            <button
+              type="button"
+              onClick={() => setFilter('all')}
+              className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+                filter === 'all'
+                  ? 'bg-[#FFFFFF] text-[#283747] shadow-[0_1px_2px_rgba(40,55,71,0.05)]'
+                  : 'text-[#5D6D7E] hover:text-[#283747]'
+              }`}
+            >
+              All ({calls.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter('missed')}
+              className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
+                filter === 'missed'
+                  ? 'bg-[#FFFFFF] text-[#283747] shadow-[0_1px_2px_rgba(40,55,71,0.05)]'
+                  : 'text-[#5D6D7E] hover:text-[#283747]'
+              }`}
+            >
+              Missed
+            </button>
+          </div>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto chat-scroll">
-        {calls.length === 0 ? (
+        {filteredCalls.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-8 text-center">
             <div className="w-56 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] mb-5">
-              <img
-                src="/src/assets/images/empty_chat_artwork_1794565019150.jpg"
+              <SafeImage
+                src={CHATTR_ASSETS.emptyChatArtwork}
                 alt="Voice and video calling artwork"
-                referrerPolicy="no-referrer"
                 className="w-full h-full object-cover"
               />
             </div>
-            <h2 className="font-display text-base font-semibold text-[#283747]">No calls yet</h2>
+            <h2 className="font-display text-base font-semibold text-[#283747]">
+              {filter === 'missed' ? 'No missed calls' : 'No calls yet'}
+            </h2>
             <p className="text-sm text-[#5D6D7E] mt-1 max-w-sm">
-              Start a voice or video call from any friend conversation and your call history will appear here.
+              {filter === 'missed'
+                ? 'You have no missed or declined calls.'
+                : 'Start a voice or video call from any friend conversation and your call history will appear here.'}
             </p>
           </div>
         ) : (
           <div className="divide-y divide-[#F4F6F8]">
-            {calls.map((call) => {
+            {filteredCalls.map((call) => {
               const isMissedOrDeclined = call.status === 'missed' || call.status === 'declined';
               const isOnline = Boolean(onlineMap[call.peer.id]);
 

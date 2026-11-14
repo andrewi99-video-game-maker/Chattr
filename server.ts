@@ -1,17 +1,23 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   areFriends,
+  checkpointDb,
+  closeDb,
   createCallRecord,
+  createFirebaseUser,
   createSession,
   createUser,
   db,
   deleteMessageBySender,
   deleteSession,
+  editMessageBySender,
+  findUserByFirebaseUid,
   findUserByUsername,
   finishCallRecord,
   getCallRecord,
@@ -23,17 +29,91 @@ import {
   getUserBySessionToken,
   getUserCallHistory,
   insertMessage,
+  isUsernameAvailable,
+  isValidUsername,
   markCallAnswered,
   markMessagesRead,
+  normalizeUsername,
   searchUsers,
   toggleMessageReaction,
+  updateUserPassword,
   updateUserProfile,
   verifyPassword,
 } from './server/db.ts';
+import {
+  cloudflareSecurityHeaders,
+  createRateLimiter,
+  getClientIp,
+  getTurnstilePublicConfig,
+  verifyTurnstileToken,
+} from './server/security.ts';
 import type { PublicUser } from './src/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+let firebaseApiKey = '';
+try {
+  const rawCfg = fs.readFileSync(path.join(process.cwd(), 'firebase-applet-config.json'), 'utf8');
+  const parsedCfg = JSON.parse(rawCfg) as { apiKey?: string };
+  firebaseApiKey = parsedCfg.apiKey || '';
+} catch {
+  firebaseApiKey = '';
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<{
+  uid: string;
+  email: string;
+  displayName: string;
+} | null> {
+  if (!firebaseApiKey || !idToken.trim()) return null;
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseApiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      users?: Array<{
+        localId?: string;
+        email?: string;
+        emailVerified?: boolean;
+        displayName?: string;
+        disabled?: boolean;
+      }>;
+    };
+    const u = data.users?.[0];
+    if (!u?.localId || u.disabled) return null;
+    return {
+      uid: u.localId,
+      email: u.email || '',
+      displayName: u.displayName || (u.email ? u.email.split('@')[0] : 'Chattr User'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function suggestCleanUsername(raw: string): string {
+  const base = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '_')
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+    .slice(0, 18);
+  const root = base.length >= 3 ? base : 'chattr_user';
+  if (isValidUsername(root) && isUsernameAvailable(root)) return root;
+  for (let i = 1; i <= 50; i++) {
+    const candidate = `${root.slice(0, 18)}_${i}`;
+    if (isValidUsername(candidate) && isUsernameAvailable(candidate)) {
+      return candidate;
+    }
+  }
+  return `user_${crypto.randomBytes(3).toString('hex')}`;
+}
 
 // Active WebSocket connections per userId (supports multiple tabs)
 const userSockets = new Map<string, Set<WebSocket>>();
@@ -107,20 +187,76 @@ function requireAuth(req: AuthedRequest, res: express.Response, next: express.Ne
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', true);
+  app.use(cloudflareSecurityHeaders);
   app.use(express.json({ limit: '1mb' }));
 
+  const apiGeneralLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 300,
+    keyPrefix: 'api',
+  });
+  const authLimiter = createRateLimiter({
+    windowMs: 5 * 60_000,
+    max: 25,
+    keyPrefix: 'auth',
+    message: 'Too many authentication attempts. Please wait a few minutes.',
+  });
+  const writeLimiter = createRateLimiter({
+    windowMs: 60_000,
+    max: 120,
+    keyPrefix: 'write',
+    message: 'Slow down slightly before sending more requests.',
+  });
+
+  app.use('/api', apiGeneralLimiter);
+
+  app.get('/api/security/status', (req, res) => {
+    res.json(getTurnstilePublicConfig(req));
+  });
+
   // --- Auth Routes ---
-  app.post('/api/auth/signup', (req, res) => {
-    const { username, password, displayName } = req.body || {};
+  app.get('/api/auth/check-username', (req, res) => {
+    const raw = typeof req.query.username === 'string' ? req.query.username : '';
+    const clean = normalizeUsername(raw);
+    if (!clean) {
+      res.json({ valid: false, available: false });
+      return;
+    }
+    if (!isValidUsername(clean)) {
+      res.json({
+        valid: false,
+        available: false,
+        reason: 'Use 3–24 letters, numbers, underscores, dots, or hyphens.',
+      });
+      return;
+    }
+    const excludeId = typeof req.query.excludeUserId === 'string' ? req.query.excludeUserId : undefined;
+    const available = isUsernameAvailable(clean, excludeId);
+    res.json({
+      valid: true,
+      available,
+      reason: available ? undefined : 'That username is already taken.',
+    });
+  });
+
+  app.post('/api/auth/signup', authLimiter, async (req, res) => {
+    const { username, password, displayName, turnstileToken } = req.body || {};
+    const cfCheck = await verifyTurnstileToken(turnstileToken, getClientIp(req));
+    if (!cfCheck.ok) {
+      res.status(403).json({ error: cfCheck.error });
+      return;
+    }
+
     if (typeof username !== 'string' || typeof password !== 'string') {
       res.status(400).json({ error: 'Username and password are required.' });
       return;
     }
 
-    const cleanUsername = username.trim().toLowerCase();
-    if (!/^[a-z0-9_]{3,24}$/.test(cleanUsername)) {
+    const cleanUsername = normalizeUsername(username);
+    if (!isValidUsername(cleanUsername)) {
       res.status(400).json({
-        error: 'Username must be 3–24 characters using letters, numbers, or underscores.',
+        error: 'Username must be 3–24 characters using letters, numbers, underscores, dots, or hyphens.',
       });
       return;
     }
@@ -136,20 +272,47 @@ async function startServer() {
       return;
     }
 
-    const user = createUser(cleanUsername, password, typeof displayName === 'string' ? displayName : '');
-    const token = createSession(user.id);
-    res.status(201).json({ token, user });
+    try {
+      const user = createUser(cleanUsername, password, typeof displayName === 'string' ? displayName : '');
+      const token = createSession(user.id);
+      checkpointDb();
+      res.status(201).json({ token, user });
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        'code' in err &&
+        (err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+      ) {
+        res.status(409).json({ error: 'That username is already taken.' });
+        return;
+      }
+      throw err;
+    }
   });
 
-  app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body || {};
+  app.post('/api/auth/login', authLimiter, async (req, res) => {
+    const { username, password, turnstileToken } = req.body || {};
+    const cfCheck = await verifyTurnstileToken(turnstileToken, getClientIp(req));
+    if (!cfCheck.ok) {
+      res.status(403).json({ error: cfCheck.error });
+      return;
+    }
+
     if (typeof username !== 'string' || typeof password !== 'string') {
       res.status(400).json({ error: 'Username and password are required.' });
       return;
     }
 
     const record = findUserByUsername(username);
-    if (!record || !verifyPassword(password, record.passwordHash)) {
+    if (!record) {
+      res.status(401).json({ error: 'Invalid username or password.' });
+      return;
+    }
+    if (record.passwordHash === 'oauth:firebase') {
+      res.status(401).json({ error: 'This account signs in with Google. Use "Continue with Google" below.' });
+      return;
+    }
+    if (!verifyPassword(password, record.passwordHash)) {
       res.status(401).json({ error: 'Invalid username or password.' });
       return;
     }
@@ -157,6 +320,98 @@ async function startServer() {
     const token = createSession(record.id);
     const { passwordHash: _ignored, ...publicUser } = record;
     res.json({ token, user: publicUser });
+  });
+
+  app.post('/api/auth/firebase', authLimiter, async (req, res) => {
+    const { idToken, username, displayName, bio, avatarColor, turnstileToken } = req.body || {};
+    if (typeof idToken !== 'string' || !idToken.trim()) {
+      res.status(400).json({ error: 'Firebase ID token is required.' });
+      return;
+    }
+
+    const verified = await verifyFirebaseIdToken(idToken);
+    if (!verified) {
+      res.status(401).json({ error: 'Could not verify Google session with Firebase.' });
+      return;
+    }
+
+    const existing = findUserByFirebaseUid(verified.uid);
+    if (existing) {
+      let currentUser = existing;
+      if (
+        typeof username === 'string' ||
+        typeof displayName === 'string' ||
+        typeof bio === 'string' ||
+        typeof avatarColor === 'string'
+      ) {
+        const updated = updateUserProfile(existing.id, {
+          username: typeof username === 'string' ? username : undefined,
+          displayName: typeof displayName === 'string' ? displayName : undefined,
+          bio: typeof bio === 'string' ? bio : undefined,
+          avatarColor: typeof avatarColor === 'string' ? avatarColor : undefined,
+        });
+        if (!updated.user) {
+          res.status(updated.status || 400).json({ error: updated.error || 'Could not sync profile.' });
+          return;
+        }
+        currentUser = updated.user;
+      }
+      const token = createSession(currentUser.id);
+      res.json({ token, user: currentUser, needsUsernameSetup: false });
+      return;
+    }
+
+    // First-time Google user: enforce Turnstile only on initial sign-in if not yet onboarding
+    if (typeof username !== 'string' || !username.trim()) {
+      const cfCheck = await verifyTurnstileToken(turnstileToken, getClientIp(req));
+      if (!cfCheck.ok) {
+        res.status(403).json({ error: cfCheck.error });
+        return;
+      }
+      res.json({
+        needsUsernameSetup: true,
+        firebaseUid: verified.uid,
+        email: verified.email,
+        suggestedDisplayName: verified.displayName,
+        suggestedUsername: suggestCleanUsername(verified.email.split('@')[0] || verified.displayName),
+      });
+      return;
+    }
+
+    const cleanUsername = normalizeUsername(username);
+    if (!isValidUsername(cleanUsername)) {
+      res.status(400).json({
+        error: 'Username must be 3–24 characters using letters, numbers, underscores, dots, or hyphens.',
+      });
+      return;
+    }
+    if (!isUsernameAvailable(cleanUsername)) {
+      res.status(409).json({ error: 'That username is already taken.' });
+      return;
+    }
+
+    try {
+      const user = createFirebaseUser({
+        firebaseUid: verified.uid,
+        username: cleanUsername,
+        displayName: typeof displayName === 'string' && displayName.trim() ? displayName : verified.displayName,
+        bio: typeof bio === 'string' ? bio : '',
+        avatarColor: typeof avatarColor === 'string' ? avatarColor : undefined,
+      });
+      const token = createSession(user.id);
+      checkpointDb();
+      res.status(201).json({ token, user, needsUsernameSetup: false });
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        'code' in err &&
+        (err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+      ) {
+        res.status(409).json({ error: 'That username is already taken.' });
+        return;
+      }
+      throw err;
+    }
   });
 
   app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
@@ -172,23 +427,38 @@ async function startServer() {
 
   app.patch('/api/auth/profile', requireAuth, (req: AuthedRequest, res) => {
     const user = req.user!;
-    const { displayName, bio, avatarColor } = req.body || {};
-    const updated = updateUserProfile(user.id, { displayName, bio, avatarColor });
-    if (!updated) {
-      res.status(404).json({ error: 'User not found' });
+    const { username, displayName, bio, avatarColor } = req.body || {};
+    const result = updateUserProfile(user.id, { username, displayName, bio, avatarColor });
+    if (!result.user) {
+      res.status(result.status || 400).json({ error: result.error || 'Failed to update profile.' });
       return;
     }
     const friendIds = getFriendIds(user.id);
     for (const fid of friendIds) {
       sendToUser(fid, 'friends:updated', {});
     }
-    res.json({ user: updated });
+    res.json({ user: result.user });
+  });
+
+  app.post('/api/auth/password', requireAuth, (req: AuthedRequest, res) => {
+    const user = req.user!;
+    const { currentPassword, newPassword } = req.body || {};
+    if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+      res.status(400).json({ error: 'Current password and new password are required.' });
+      return;
+    }
+    const result = updateUserPassword(user.id, currentPassword, newPassword);
+    if (!result.ok) {
+      res.status(result.status || 400).json({ error: result.error || 'Could not update password.' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // --- User Search & Friends Routes ---
   app.get('/api/users/search', requireAuth, (req: AuthedRequest, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q : '';
-    const users = searchUsers(req.user!.id, q);
+    const users = searchUsers(req.user!.id, q, getOnlineUserIds());
     res.json({ users });
   });
 
@@ -197,7 +467,7 @@ async function startServer() {
     res.json(overview);
   });
 
-  app.post('/api/friends/request', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/friends/request', requireAuth, writeLimiter, (req: AuthedRequest, res) => {
     const me = req.user!;
     const { username, targetUserId } = req.body || {};
 
@@ -334,7 +604,7 @@ async function startServer() {
     res.json({ messages });
   });
 
-  app.post('/api/messages/:friendId', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/messages/:friendId', requireAuth, writeLimiter, (req: AuthedRequest, res) => {
     const me = req.user!;
     const friendId = String(req.params.friendId);
     const { body, replyToId } = req.body || {};
@@ -374,6 +644,24 @@ async function startServer() {
     const updated = toggleMessageReaction(messageId, me.id, emoji.trim());
     if (!updated) {
       res.status(404).json({ error: 'Message not found.' });
+      return;
+    }
+    sendToUser(updated.senderId, 'message:updated', { message: updated });
+    sendToUser(updated.recipientId, 'message:updated', { message: updated });
+    res.json({ message: updated });
+  });
+
+  app.patch('/api/messages/:messageId', requireAuth, (req: AuthedRequest, res) => {
+    const me = req.user!;
+    const messageId = String(req.params.messageId);
+    const { body } = req.body || {};
+    if (typeof body !== 'string' || body.trim().length === 0) {
+      res.status(400).json({ error: 'Message cannot be empty.' });
+      return;
+    }
+    const updated = editMessageBySender(messageId, me.id, body.trim().slice(0, 4000));
+    if (!updated) {
+      res.status(404).json({ error: 'Message not found or cannot be edited.' });
       return;
     }
     sendToUser(updated.senderId, 'message:updated', { message: updated });
@@ -648,8 +936,16 @@ async function startServer() {
   });
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Relay server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Chattr server listening on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    closeDb();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 startServer().catch((err) => {

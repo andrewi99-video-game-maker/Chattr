@@ -7,6 +7,7 @@ import {
   Users,
   Video,
 } from 'lucide-react';
+import { signOut } from 'firebase/auth';
 import { AuthScreen } from './components/AuthScreen.tsx';
 import { Avatar } from './components/Avatar.tsx';
 import { CallStage } from './components/CallStage.tsx';
@@ -14,7 +15,35 @@ import { CallsView } from './components/CallsView.tsx';
 import { ChatView } from './components/ChatView.tsx';
 import { FriendsView } from './components/FriendsView.tsx';
 import { ProfileModal } from './components/ProfileModal.tsx';
-import { apiRequest, getStoredToken, setStoredToken } from './lib/api.ts';
+import { SafeImage } from './components/SafeImage.tsx';
+import {
+  ApiError,
+  apiRequest,
+  getStoredSelectedFriend,
+  getStoredToken,
+  setLastUsername,
+  setStoredSelectedFriend,
+  setStoredToken,
+} from './lib/api.ts';
+import { CHATTR_ASSETS } from './lib/assets.ts';
+import { auth } from './lib/firebase.ts';
+import {
+  createCallRecordFirestore,
+  deleteMessageFirestore,
+  editMessageFirestore,
+  getUserProfileFirestore,
+  lookupUserByUsernameFirestore,
+  markMessagesReadFirestore,
+  removeFriendFirestore,
+  respondToFriendRequestFirestore,
+  sendFriendRequestFirestore,
+  sendMessageFirestore,
+  subscribeToCallsFirestore,
+  subscribeToFriendshipsFirestore,
+  subscribeToMessagesFirestore,
+  toggleReactionFirestore,
+  updateCallRecordFirestore,
+} from './lib/firestoreChattr.ts';
 import {
   playMessageCue,
   startIncomingRingtone,
@@ -58,16 +87,27 @@ function createSilentFallbackStream(): MediaStream {
 
 export default function App() {
   const [booting, setBooting] = useState(true);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [user, setUser] = useState<PublicUser | null>(null);
   const [token, setToken] = useState<string | null>(() => getStoredToken());
+  const [authMode, setAuthMode] = useState<'local' | 'firebase'>('local');
 
   const [tab, setTab] = useState<WorkspaceTab>('messages');
-  const [friends, setFriends] = useState<FriendItem[]>([]);
-  const [incomingRequests, setIncomingRequests] = useState<FriendRequestItem[]>([]);
-  const [outgoingRequests, setOutgoingRequests] = useState<FriendRequestItem[]>([]);
-  const [calls, setCalls] = useState<CallLogItem[]>([]);
+  const [localFriends, setLocalFriends] = useState<FriendItem[]>([]);
+  const [localIncoming, setLocalIncoming] = useState<FriendRequestItem[]>([]);
+  const [localOutgoing, setLocalOutgoing] = useState<FriendRequestItem[]>([]);
+  const [localCalls, setLocalCalls] = useState<CallLogItem[]>([]);
 
-  const [selectedFriendId, setSelectedFriendId] = useState<string | null>(null);
+  const [fsFriends, setFsFriends] = useState<FriendItem[]>([]);
+  const [fsIncoming, setFsIncoming] = useState<FriendRequestItem[]>([]);
+  const [fsOutgoing, setFsOutgoing] = useState<FriendRequestItem[]>([]);
+  const [fsCalls, setFsCalls] = useState<CallLogItem[]>([]);
+  const [presenceByUid, setPresenceByUid] = useState<Record<string, { online: boolean; inCall: boolean }>>({});
+
+  const [selectedFriendId, setSelectedFriendId] = useState<string | null>(() =>
+    getStoredSelectedFriend()
+  );
   const [sidebarSearch, setSidebarSearch] = useState('');
   const [messagesByFriend, setMessagesByFriend] = useState<Record<string, ChatMessage[]>>({});
   const [loadingMessagesFor, setLoadingMessagesFor] = useState<string | null>(null);
@@ -95,6 +135,8 @@ export default function App() {
   const selectedFriendIdRef = useRef<string | null>(null);
   const tabRef = useRef<WorkspaceTab>('messages');
   const userRef = useRef<PublicUser | null>(null);
+  const authModeRef = useRef<'local' | 'firebase'>('local');
+  const firestorePeerIdsRef = useRef<Set<string>>(new Set());
   const typingTimeoutsRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
@@ -121,6 +163,75 @@ export default function App() {
     userRef.current = user;
   }, [user]);
 
+  useEffect(() => {
+    authModeRef.current = authMode;
+  }, [authMode]);
+
+  useEffect(() => {
+    const set = new Set<string>();
+    for (const f of fsFriends) set.add(f.id);
+    for (const r of fsIncoming) set.add(r.user.id);
+    for (const r of fsOutgoing) set.add(r.user.id);
+    firestorePeerIdsRef.current = set;
+  }, [fsFriends, fsIncoming, fsOutgoing]);
+
+  const friends = useMemo(() => {
+    const map = new Map<string, FriendItem>();
+    for (const f of localFriends) {
+      const pres = presenceByUid[f.id];
+      map.set(f.id, {
+        ...f,
+        online: pres ? pres.online : f.online,
+        inCall: pres ? pres.inCall : f.inCall,
+      });
+    }
+    for (const f of fsFriends) {
+      const existing = map.get(f.id);
+      const pres = presenceByUid[f.id];
+      const fsMsgs = messagesByFriend[f.id];
+      const lastFsMsg = fsMsgs && fsMsgs.length > 0 ? fsMsgs[fsMsgs.length - 1] : null;
+      const unreadFs =
+        fsMsgs && user
+          ? fsMsgs.filter((m) => m.senderId === f.id && !m.readAt).length
+          : 0;
+      map.set(f.id, {
+        ...f,
+        online: pres ? pres.online : existing?.online ?? false,
+        inCall: pres ? pres.inCall : existing?.inCall ?? false,
+        lastMessage: lastFsMsg || existing?.lastMessage || null,
+        unreadCount: fsMsgs ? unreadFs : existing?.unreadCount ?? 0,
+      });
+    }
+    const list = Array.from(map.values());
+    list.sort((a, b) => {
+      const aTime = a.lastMessage?.createdAt ?? a.createdAt;
+      const bTime = b.lastMessage?.createdAt ?? b.createdAt;
+      return bTime - aTime;
+    });
+    return list;
+  }, [localFriends, fsFriends, presenceByUid, messagesByFriend, user]);
+
+  const incomingRequests = useMemo(() => {
+    const map = new Map<string, FriendRequestItem>();
+    for (const r of localIncoming) map.set(r.user.id, r);
+    for (const r of fsIncoming) map.set(r.user.id, r);
+    return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+  }, [localIncoming, fsIncoming]);
+
+  const outgoingRequests = useMemo(() => {
+    const map = new Map<string, FriendRequestItem>();
+    for (const r of localOutgoing) map.set(r.user.id, r);
+    for (const r of fsOutgoing) map.set(r.user.id, r);
+    return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+  }, [localOutgoing, fsOutgoing]);
+
+  const calls = useMemo(() => {
+    const map = new Map<string, CallLogItem>();
+    for (const c of localCalls) map.set(c.id, c);
+    for (const c of fsCalls) map.set(c.id, c);
+    return Array.from(map.values()).sort((a, b) => b.startedAt - a.startedAt);
+  }, [localCalls, fsCalls]);
+
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     window.setTimeout(() => {
@@ -142,9 +253,16 @@ export default function App() {
         incomingRequests: FriendRequestItem[];
         outgoingRequests: FriendRequestItem[];
       }>('/api/friends');
-      setFriends(data.friends);
-      setIncomingRequests(data.incomingRequests);
-      setOutgoingRequests(data.outgoingRequests);
+      setLocalFriends(data.friends);
+      setLocalIncoming(data.incomingRequests);
+      setLocalOutgoing(data.outgoingRequests);
+      setPresenceByUid((prev) => {
+        const next = { ...prev };
+        for (const f of data.friends) {
+          next[f.id] = { online: f.online, inCall: f.inCall };
+        }
+        return next;
+      });
     } catch {
       // ignore transient error
     }
@@ -153,13 +271,16 @@ export default function App() {
   const refreshCalls = useCallback(async () => {
     try {
       const data = await apiRequest<{ calls: CallLogItem[] }>('/api/calls');
-      setCalls(data.calls);
+      setLocalCalls(data.calls);
     } catch {
       // ignore transient error
     }
   }, []);
 
   const loadMessages = useCallback(async (friendId: string) => {
+    if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(friendId)) {
+      return;
+    }
     setLoadingMessagesFor(friendId);
     try {
       const data = await apiRequest<{ messages: ChatMessage[] }>(`/api/messages/${friendId}`);
@@ -167,7 +288,7 @@ export default function App() {
         ...prev,
         [friendId]: data.messages,
       }));
-      setFriends((prev) =>
+      setLocalFriends((prev) =>
         prev.map((f) => (f.id === friendId ? { ...f, unreadCount: 0 } : f))
       );
     } finally {
@@ -307,36 +428,152 @@ export default function App() {
     [sendWs]
   );
 
-  // Boot session check
-  useEffect(() => {
-    let active = true;
-    async function init() {
+  // Boot session check (supports both local sessions and Firebase Google Auth persistence)
+  const checkSession = useCallback(async () => {
+    setBooting(true);
+    setBootError(null);
+    try {
+      await auth.authStateReady();
       const stored = getStoredToken();
-      if (!stored) {
-        if (active) setBooting(false);
-        return;
-      }
-      try {
-        const data = await apiRequest<{ user: PublicUser }>('/api/auth/me');
-        if (active) {
-          setUser(data.user);
+
+      if (stored) {
+        try {
+          const data = await apiRequest<{ user: PublicUser }>('/api/auth/me');
+          const isFb = Boolean(auth.currentUser && auth.currentUser.uid === data.user.id);
+          setAuthMode(isFb ? 'firebase' : 'local');
+          setUser({ ...data.user, authProvider: isFb ? 'google' : 'local' });
           setToken(stored);
+          setLastUsername(data.user.username);
+          setSessionNotice(null);
+          return;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 401) {
+            setStoredToken(null);
+            setToken(null);
+            if (!auth.currentUser) {
+              setUser(null);
+              setSessionNotice(
+                'Your session expired or the server reset. Sign in or create an account to continue.'
+              );
+              return;
+            }
+          } else {
+            setBootError('Unable to reach Chattr right now. Your session is still saved.');
+            return;
+          }
         }
-      } catch {
-        setStoredToken(null);
-        if (active) {
-          setUser(null);
-          setToken(null);
-        }
-      } finally {
-        if (active) setBooting(false);
       }
+
+      // Restore Firebase Google session seamlessly if user already chose a handle
+      if (auth.currentUser) {
+        const fsProfile = await getUserProfileFirestore(auth.currentUser.uid).catch(() => null);
+        if (fsProfile) {
+          const idToken = await auth.currentUser.getIdToken();
+          const bridgeRes = await apiRequest<{
+            needsUsernameSetup: boolean;
+            token?: string;
+            user?: PublicUser;
+          }>('/api/auth/firebase', {
+            method: 'POST',
+            body: JSON.stringify({
+              idToken,
+              username: fsProfile.username,
+              displayName: fsProfile.displayName,
+              bio: fsProfile.bio,
+              avatarColor: fsProfile.avatarColor,
+            }),
+          });
+          if (bridgeRes.token && bridgeRes.user) {
+            setStoredToken(bridgeRes.token);
+            setToken(bridgeRes.token);
+            setAuthMode('firebase');
+            setUser({ ...bridgeRes.user, authProvider: 'google' });
+            setLastUsername(bridgeRes.user.username);
+            setSessionNotice(null);
+            return;
+          }
+        }
+      }
+    } catch {
+      // fall back to auth screen
+    } finally {
+      setBooting(false);
     }
-    void init();
-    return () => {
-      active = false;
-    };
   }, []);
+
+  useEffect(() => {
+    void checkSession();
+  }, [checkSession]);
+
+  useEffect(() => {
+    setStoredSelectedFriend(selectedFriendId);
+  }, [selectedFriendId]);
+
+  // Real-time Firestore subscriptions for Google/Firebase authenticated users
+  useEffect(() => {
+    if (!user || authMode !== 'firebase') {
+      setFsFriends([]);
+      setFsIncoming([]);
+      setFsOutgoing([]);
+      setFsCalls([]);
+      return;
+    }
+
+    const unsubFriends = subscribeToFriendshipsFirestore(user.id, (data) => {
+      setFsFriends(data.friends);
+      setFsIncoming(data.incomingRequests);
+      setFsOutgoing(data.outgoingRequests);
+    });
+
+    const unsubCalls = subscribeToCallsFirestore(user.id, (callList) => {
+      setFsCalls(callList);
+    });
+
+    return () => {
+      unsubFriends();
+      unsubCalls();
+    };
+  }, [user?.id, authMode]);
+
+  // Real-time Firestore message listeners for Google-to-Google conversations
+  useEffect(() => {
+    if (!user || authMode !== 'firebase' || fsFriends.length === 0) return;
+
+    const unsubs = fsFriends.map((friend) =>
+      subscribeToMessagesFirestore(user.id, friend.id, (msgs) => {
+        setMessagesByFriend((prev) => {
+          const prevList = prev[friend.id] || [];
+          const newest = msgs[msgs.length - 1];
+          const prevNewest = prevList[prevList.length - 1];
+          if (
+            newest &&
+            newest.id !== prevNewest?.id &&
+            newest.senderId !== user.id &&
+            newest.kind === 'text' &&
+            Date.now() - newest.createdAt < 10_000
+          ) {
+            playMessageCue();
+          }
+          return { ...prev, [friend.id]: msgs };
+        });
+
+        const isViewing =
+          tabRef.current === 'messages' && selectedFriendIdRef.current === friend.id;
+        if (isViewing) {
+          const unreadIds = msgs
+            .filter((m) => m.senderId === friend.id && !m.readAt)
+            .map((m) => m.id);
+          if (unreadIds.length > 0) {
+            void markMessagesReadFirestore(user.id, friend.id, unreadIds).catch(() => {});
+          }
+        }
+      })
+    );
+
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  }, [user?.id, authMode, fsFriends]);
 
   // Load initial data + maintain WebSocket connection when authenticated
   useEffect(() => {
@@ -378,7 +615,8 @@ export default function App() {
           const uid = payload.userId as string;
           const online = Boolean(payload.online);
           const inCall = Boolean(payload.inCall);
-          setFriends((prev) =>
+          setPresenceByUid((prev) => ({ ...prev, [uid]: { online, inCall } }));
+          setLocalFriends((prev) =>
             prev.map((f) => (f.id === uid ? { ...f, online, inCall } : f))
           );
           return;
@@ -453,7 +691,7 @@ export default function App() {
             return { ...prev, [peerId]: [...existing, msg] };
           });
 
-          setFriends((prev) => {
+          setLocalFriends((prev) => {
             const updated = prev.map((f) => {
               if (f.id !== peerId) return f;
               const incUnread =
@@ -514,6 +752,14 @@ export default function App() {
 
         if (event === 'call:unavailable' || event === 'call:error') {
           const reason = (payload.reason as string) || 'Call unavailable.';
+          const cur = activeCallRef.current;
+          if (cur && authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(cur.peer.id)) {
+            void updateCallRecordFirestore({
+              callId: cur.callId,
+              status: 'missed',
+              durationSec: 0,
+            }).catch(() => {});
+          }
           cleanupCallMedia();
           showToast(reason);
           void refreshCalls();
@@ -674,13 +920,29 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedFriendId || !user) return;
+    if (authMode === 'firebase' && firestorePeerIdsRef.current.has(selectedFriendId)) {
+      const msgs = messagesByFriend[selectedFriendId] || [];
+      const unreadIds = msgs
+        .filter((m) => m.senderId === selectedFriendId && !m.readAt)
+        .map((m) => m.id);
+      if (unreadIds.length > 0) {
+        void markMessagesReadFirestore(user.id, selectedFriendId, unreadIds).catch(() => {});
+      }
+      return;
+    }
     void loadMessages(selectedFriendId);
-  }, [selectedFriendId, user?.id, loadMessages]);
+  }, [selectedFriendId, user?.id, authMode, loadMessages]);
 
-  const handleAuthenticated = useCallback((authedUser: PublicUser, authedToken: string) => {
-    setUser(authedUser);
-    setToken(authedToken);
-  }, []);
+  const handleAuthenticated = useCallback(
+    (authedUser: PublicUser, authedToken: string, mode: 'local' | 'firebase') => {
+      setSessionNotice(null);
+      setAuthMode(mode);
+      setUser(authedUser);
+      setToken(authedToken);
+      setLastUsername(authedUser.username);
+    },
+    []
+  );
 
   const handleLogout = useCallback(async () => {
     try {
@@ -688,14 +950,24 @@ export default function App() {
     } catch {
       // ignore
     }
+    if (auth.currentUser) {
+      await signOut(auth).catch(() => {});
+    }
     cleanupCallMedia();
     setStoredToken(null);
+    setStoredSelectedFriend(null);
+    setAuthMode('local');
     setUser(null);
     setToken(null);
-    setFriends([]);
-    setIncomingRequests([]);
-    setOutgoingRequests([]);
-    setCalls([]);
+    setLocalFriends([]);
+    setLocalIncoming([]);
+    setLocalOutgoing([]);
+    setLocalCalls([]);
+    setFsFriends([]);
+    setFsIncoming([]);
+    setFsOutgoing([]);
+    setFsCalls([]);
+    setPresenceByUid({});
     setMessagesByFriend({});
     setSelectedFriendId(null);
     setShowProfileModal(false);
@@ -733,6 +1005,14 @@ export default function App() {
       };
       setActiveCall(session);
       startOutgoingRingback();
+      if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(peer.id) && userRef.current) {
+        void createCallRecordFirestore({
+          id: callId,
+          callerId: userRef.current.id,
+          calleeId: peer.id,
+          callType,
+        }).catch(() => {});
+      }
       sendWs('call:invite', { toUserId: peer.id, callType, callId });
     },
     [acquireMedia, sendWs, showToast]
@@ -765,6 +1045,9 @@ export default function App() {
       mediaNotice: notice,
     };
     setActiveCall(session);
+    if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(inc.caller.id)) {
+      void updateCallRecordFirestore({ callId: inc.callId, status: 'active' }).catch(() => {});
+    }
     sendWs('call:accept', { callId: inc.callId, toUserId: inc.caller.id });
   }, [acquireMedia, createPeerConnection, sendWs]);
 
@@ -773,12 +1056,28 @@ export default function App() {
     if (!inc) return;
     stopCallTones();
     setIncomingCall(null);
+    if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(inc.caller.id)) {
+      void updateCallRecordFirestore({ callId: inc.callId, status: 'declined', durationSec: 0 }).catch(
+        () => {}
+      );
+    }
     sendWs('call:decline', { callId: inc.callId, toUserId: inc.caller.id });
   }, [sendWs]);
 
   const handleEndCall = useCallback(() => {
     const cur = activeCallRef.current;
     if (!cur) return;
+    if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(cur.peer.id)) {
+      const isConnected = cur.connectedAt !== null;
+      const durationSec = isConnected
+        ? Math.max(1, Math.round((Date.now() - cur.connectedAt!) / 1000))
+        : 0;
+      void updateCallRecordFirestore({
+        callId: cur.callId,
+        status: isConnected ? 'ended' : 'missed',
+        durationSec,
+      }).catch(() => {});
+    }
     sendWs('call:end', { callId: cur.callId, toUserId: cur.peer.id });
     cleanupCallMedia();
     void refreshCalls();
@@ -825,7 +1124,22 @@ export default function App() {
 
   const handleSendMessage = useCallback(
     async (body: string, replyToId?: string | null) => {
-      if (!selectedFriendId) return;
+      if (!selectedFriendId || !userRef.current) return;
+      if (authModeRef.current === 'firebase' && firestorePeerIdsRef.current.has(selectedFriendId)) {
+        const list = messagesByFriend[selectedFriendId] || [];
+        const replyTarget = replyToId ? list.find((m) => m.id === replyToId) || null : null;
+        await sendMessageFirestore({
+          senderId: userRef.current.id,
+          recipientId: selectedFriendId,
+          body,
+          replyTo: replyTarget
+            ? { id: replyTarget.id, senderId: replyTarget.senderId, body: replyTarget.body }
+            : null,
+          kind: 'text',
+        });
+        return;
+      }
+
       const data = await apiRequest<{ message: ChatMessage }>(`/api/messages/${selectedFriendId}`, {
         method: 'POST',
         body: JSON.stringify({ body, replyToId }),
@@ -836,30 +1150,179 @@ export default function App() {
         return { ...prev, [selectedFriendId]: [...list, data.message] };
       });
     },
+    [selectedFriendId, messagesByFriend]
+  );
+
+  const handleEditMessage = useCallback(
+    async (messageId: string, body: string) => {
+      if (
+        selectedFriendId &&
+        userRef.current &&
+        authModeRef.current === 'firebase' &&
+        firestorePeerIdsRef.current.has(selectedFriendId)
+      ) {
+        await editMessageFirestore(userRef.current.id, selectedFriendId, messageId, body);
+        return;
+      }
+
+      const data = await apiRequest<{ message: ChatMessage }>(`/api/messages/${messageId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+      });
+      const peerId =
+        data.message.senderId === userRef.current?.id
+          ? data.message.recipientId
+          : data.message.senderId;
+      setMessagesByFriend((prev) => {
+        const list = prev[peerId];
+        if (!list) return prev;
+        return {
+          ...prev,
+          [peerId]: list.map((m) => (m.id === data.message.id ? data.message : m)),
+        };
+      });
+    },
     [selectedFriendId]
   );
 
-  const handleReactMessage = useCallback(async (messageId: string, emoji: string) => {
-    await apiRequest(`/api/messages/${messageId}/react`, {
-      method: 'POST',
-      body: JSON.stringify({ emoji }),
-    });
-  }, []);
+  const handleReactMessage = useCallback(
+    async (messageId: string, emoji: string) => {
+      if (
+        selectedFriendId &&
+        userRef.current &&
+        authModeRef.current === 'firebase' &&
+        firestorePeerIdsRef.current.has(selectedFriendId)
+      ) {
+        const currentMsg = (messagesByFriend[selectedFriendId] || []).find((m) => m.id === messageId);
+        await toggleReactionFirestore(
+          userRef.current.id,
+          selectedFriendId,
+          messageId,
+          emoji,
+          currentMsg?.reactions || {}
+        );
+        return;
+      }
 
-  const handleDeleteMessage = useCallback(async (messageId: string) => {
-    await apiRequest(`/api/messages/${messageId}`, { method: 'DELETE' });
-  }, []);
+      await apiRequest(`/api/messages/${messageId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+      });
+    },
+    [selectedFriendId, messagesByFriend]
+  );
+
+  const handleDeleteMessage = useCallback(
+    async (messageId: string) => {
+      if (
+        selectedFriendId &&
+        userRef.current &&
+        authModeRef.current === 'firebase' &&
+        firestorePeerIdsRef.current.has(selectedFriendId)
+      ) {
+        await deleteMessageFirestore(userRef.current.id, selectedFriendId, messageId);
+        return;
+      }
+
+      await apiRequest(`/api/messages/${messageId}`, { method: 'DELETE' });
+    },
+    [selectedFriendId]
+  );
+
+  // Auto-cancel outgoing ringing call after 45 seconds if unanswered
+  useEffect(() => {
+    if (!activeCall || activeCall.direction !== 'outgoing' || activeCall.phase !== 'ringing') {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (
+        activeCallRef.current &&
+        activeCallRef.current.callId === activeCall.callId &&
+        activeCallRef.current.phase === 'ringing'
+      ) {
+        handleEndCall();
+        showToast('No answer.');
+      }
+    }, 45_000);
+    return () => window.clearTimeout(timer);
+  }, [activeCall?.callId, activeCall?.direction, activeCall?.phase, handleEndCall, showToast]);
+
+  const handleSendFriendRequest = useCallback(
+    async (target: {
+      username?: string;
+      targetUserId?: string;
+    }): Promise<{ status: string; username?: string }> => {
+      if (authModeRef.current === 'firebase' && userRef.current) {
+        let fsTarget: PublicUser | null = null;
+        if (target.targetUserId) {
+          fsTarget = await getUserProfileFirestore(target.targetUserId).catch(() => null);
+        } else if (target.username) {
+          fsTarget = await lookupUserByUsernameFirestore(target.username).catch(() => null);
+        }
+
+        if (fsTarget) {
+          if (fsTarget.id === userRef.current.id) {
+            throw new Error('You cannot add yourself as a friend.');
+          }
+          const fsRes = await sendFriendRequestFirestore(userRef.current.id, fsTarget.id);
+          // Also notify peer over Express/WS if present on server
+          await apiRequest('/api/friends/request', {
+            method: 'POST',
+            body: JSON.stringify({ targetUserId: fsTarget.id }),
+          }).catch(() => {});
+          return { status: fsRes.status, username: fsTarget.username };
+        }
+      }
+
+      const res = await apiRequest<{ status: string }>('/api/friends/request', {
+        method: 'POST',
+        body: JSON.stringify(target),
+      });
+      await refreshFriends();
+      return { status: res.status, username: target.username };
+    },
+    [refreshFriends]
+  );
+
+  const handleRespondFriendRequest = useCallback(
+    async (friendshipId: string, action: 'accept' | 'decline' | 'cancel', peerId: string) => {
+      if (
+        authModeRef.current === 'firebase' &&
+        userRef.current &&
+        firestorePeerIdsRef.current.has(peerId)
+      ) {
+        await respondToFriendRequestFirestore(friendshipId, action, userRef.current.id, peerId);
+        // Mirror cleanup/sync with server if an equivalent local friendship exists
+        await apiRequest('/api/friends/respond', {
+          method: 'POST',
+          body: JSON.stringify({ friendshipId, action }),
+        }).catch(() => {});
+        return;
+      }
+
+      await apiRequest('/api/friends/respond', {
+        method: 'POST',
+        body: JSON.stringify({ friendshipId, action }),
+      });
+      await refreshFriends();
+    },
+    [refreshFriends]
+  );
 
   const handleRemoveFriend = useCallback(
     async (friendId: string) => {
-      await apiRequest(`/api/friends/${friendId}`, { method: 'DELETE' });
+      const friendObj = fsFriends.find((f) => f.id === friendId);
+      if (authModeRef.current === 'firebase' && friendObj) {
+        await removeFriendFirestore(friendObj.friendshipId);
+      }
+      await apiRequest(`/api/friends/${friendId}`, { method: 'DELETE' }).catch(() => {});
       if (selectedFriendId === friendId) {
         setSelectedFriendId(null);
       }
       await refreshFriends();
       showToast('Friend removed.');
     },
-    [refreshFriends, selectedFriendId, showToast]
+    [fsFriends, refreshFriends, selectedFriendId, showToast]
   );
 
   const onlineMap = useMemo(() => {
@@ -888,6 +1351,11 @@ export default function App() {
     [friends]
   );
 
+  useEffect(() => {
+    document.title =
+      totalUnread > 0 ? `(${totalUnread}) Chattr — Texting & Calling` : 'Chattr — Texting & Calling';
+  }, [totalUnread]);
+
   if (booting) {
     return (
       <div className="min-h-screen bg-[#FFFFFF] flex items-center justify-center text-sm text-[#5D6D7E]">
@@ -896,8 +1364,27 @@ export default function App() {
     );
   }
 
+  if (bootError) {
+    return (
+      <div className="min-h-screen bg-[#FFFFFF] flex flex-col items-center justify-center p-6 text-center">
+        <div className="w-12 h-12 rounded-2xl overflow-hidden mb-4">
+          <SafeImage src={CHATTR_ASSETS.logo} alt="Chattr" className="w-full h-full object-cover" />
+        </div>
+        <h1 className="font-display text-lg font-semibold text-[#283747]">Connection Issue</h1>
+        <p className="text-sm text-[#5D6D7E] mt-1 max-w-sm">{bootError}</p>
+        <button
+          type="button"
+          onClick={() => void checkSession()}
+          className="mt-5 h-10 px-5 rounded-xl bg-[#7895B2] hover:bg-[#6684A2] text-white text-sm font-medium transition-colors cursor-pointer"
+        >
+          Retry Connection
+        </button>
+      </div>
+    );
+  }
+
   if (!user) {
-    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+    return <AuthScreen sessionNotice={sessionNotice} onAuthenticated={handleAuthenticated} />;
   }
 
   const showMobileDetail =
@@ -911,11 +1398,13 @@ export default function App() {
         className="hidden md:flex w-18 bg-[#F4F6F8] border-r border-[#E6EBF0] text-[#5D6D7E] flex-col items-center py-4 justify-between shrink-0"
       >
         <div className="flex flex-col items-center gap-3 w-full px-2">
-          <img
-            src="/assets/aistudio/Dusty_Blue_Chat_Bubble_Icon__1__dfe423b3.png"
-            alt="Chattr"
-            className="w-10 h-10 rounded-xl object-cover mb-3 select-none"
-          />
+          <div className="w-10 h-10 rounded-xl overflow-hidden mb-3 select-none shrink-0">
+            <SafeImage
+              src={CHATTR_ASSETS.logo}
+              alt="Chattr"
+              className="w-full h-full object-cover"
+            />
+          </div>
 
           <button
             type="button"
@@ -989,11 +1478,13 @@ export default function App() {
       >
         <div className="h-16 px-4 border-b border-[#E6EBF0] flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src="/assets/aistudio/Dusty_Blue_Chat_Bubble_Icon__1__dfe423b3.png"
-              alt="Chattr"
-              className="md:hidden w-8 h-8 rounded-lg object-cover shrink-0"
-            />
+            <div className="md:hidden w-8 h-8 rounded-lg overflow-hidden shrink-0">
+              <SafeImage
+                src={CHATTR_ASSETS.logo}
+                alt="Chattr"
+                className="w-full h-full object-cover"
+              />
+            </div>
             <div className="min-w-0">
               <div className="font-display text-base font-semibold text-[#283747] truncate">
                 Chattr
@@ -1150,10 +1641,14 @@ export default function App() {
       >
         {tab === 'friends' ? (
           <FriendsView
+            currentUser={user}
+            authMode={authMode}
             friends={friends}
             incomingRequests={incomingRequests}
             outgoingRequests={outgoingRequests}
-            onRefreshFriends={refreshFriends}
+            onSendFriendRequest={handleSendFriendRequest}
+            onRespondFriendRequest={handleRespondFriendRequest}
+            onRemoveFriend={handleRemoveFriend}
             onOpenChat={handleOpenChat}
             onStartCall={(friend, type) => void handleStartCall(friend, type)}
           />
@@ -1173,6 +1668,7 @@ export default function App() {
             isTyping={Boolean(typingUsers[selectedFriend.id])}
             onBackMobile={() => setSelectedFriendId(null)}
             onSendMessage={handleSendMessage}
+            onEditMessage={handleEditMessage}
             onReactMessage={handleReactMessage}
             onDeleteMessage={handleDeleteMessage}
             onTypingChange={(typing) =>
@@ -1184,10 +1680,9 @@ export default function App() {
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center bg-[#FFFFFF] p-8 text-center">
             <div className="w-72 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] mb-6">
-              <img
-                src="/src/assets/images/empty_chat_artwork_1794565019150.jpg"
+              <SafeImage
+                src={CHATTR_ASSETS.emptyChatArtwork}
                 alt="Chattr clean messaging illustration"
-                referrerPolicy="no-referrer"
                 className="w-full h-full object-cover"
               />
             </div>
@@ -1281,6 +1776,7 @@ export default function App() {
       {showProfileModal && (
         <ProfileModal
           user={user}
+          authMode={authMode}
           onClose={() => setShowProfileModal(false)}
           onUpdated={(updated) => setUser(updated)}
           onLogout={handleLogout}

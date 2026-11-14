@@ -22,6 +22,8 @@ const DB_PATH = path.join(DATA_DIR, 'relay.db');
 export const db = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
+db.pragma('wal_autocheckpoint = 100');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
@@ -79,6 +81,57 @@ db.exec(`
   );
 `);
 
+try {
+  db.exec(`ALTER TABLE messages ADD COLUMN edited_at INTEGER NULL`);
+} catch {
+  // Column already exists
+}
+
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN firebase_uid TEXT`);
+} catch {
+  // Column already exists
+}
+
+try {
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL`);
+} catch {
+  // ignore
+}
+
+try {
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(LOWER(username))`);
+} catch {
+  // Ignore if legacy rows conflict; query checks still enforce case-insensitive uniqueness
+}
+
+export function checkpointDb(): void {
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // ignore
+  }
+}
+
+export function closeDb(): void {
+  checkpointDb();
+  try {
+    db.close();
+  } catch {
+    // ignore
+  }
+}
+
+export const USERNAME_REGEX = /^[a-z0-9_.-]{3,24}$/;
+
+export function normalizeUsername(input: string): string {
+  return input.trim().replace(/^@+/, '').toLowerCase();
+}
+
+export function isValidUsername(username: string): boolean {
+  return USERNAME_REGEX.test(username);
+}
+
 export const AVATAR_COLORS = [
   '#7895B2', // Dusty Blue
   '#5E7C99', // Muted Steel
@@ -110,6 +163,7 @@ interface UserRow {
   username: string;
   display_name: string;
   password_hash?: string;
+  firebase_uid?: string | null;
   bio: string;
   avatar_color: string;
   created_at: number;
@@ -127,7 +181,7 @@ export function mapUser(row: UserRow): PublicUser {
 }
 
 export function createUser(usernameInput: string, password: string, displayNameInput?: string): PublicUser {
-  const username = usernameInput.trim().toLowerCase();
+  const username = normalizeUsername(usernameInput);
   const displayName = (displayNameInput || '').trim() || username;
   const id = crypto.randomUUID();
   const color = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
@@ -135,8 +189,8 @@ export function createUser(usernameInput: string, password: string, displayNameI
   const passwordHash = hashPassword(password);
 
   db.prepare(
-    `INSERT INTO users (id, username, display_name, password_hash, bio, avatar_color, created_at)
-     VALUES (?, ?, ?, ?, '', ?, ?)`
+    `INSERT INTO users (id, username, display_name, password_hash, firebase_uid, bio, avatar_color, created_at)
+     VALUES (?, ?, ?, ?, NULL, '', ?, ?)`
   ).run(id, username, displayName, passwordHash, color, now);
 
   return {
@@ -149,15 +203,67 @@ export function createUser(usernameInput: string, password: string, displayNameI
   };
 }
 
-export function findUserByUsername(username: string): (PublicUser & { passwordHash: string }) | null {
+export function findUserByFirebaseUid(firebaseUid: string): PublicUser | null {
   const row = db
-    .prepare(`SELECT * FROM users WHERE username = ?`)
-    .get(username.trim().toLowerCase()) as UserRow | undefined;
+    .prepare(`SELECT id, username, display_name, bio, avatar_color, created_at FROM users WHERE firebase_uid = ?`)
+    .get(firebaseUid) as UserRow | undefined;
+  return row ? mapUser(row) : null;
+}
+
+export function createFirebaseUser(params: {
+  firebaseUid: string;
+  username: string;
+  displayName?: string;
+  bio?: string;
+  avatarColor?: string;
+}): PublicUser {
+  const username = normalizeUsername(params.username);
+  const displayName = (params.displayName || '').trim().slice(0, 40) || username;
+  const bio = (params.bio || '').trim().slice(0, 140);
+  const color =
+    params.avatarColor && AVATAR_COLORS.includes(params.avatarColor)
+      ? params.avatarColor
+      : AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
+  const now = Date.now();
+  const id = params.firebaseUid;
+
+  db.prepare(
+    `INSERT INTO users (id, username, display_name, password_hash, firebase_uid, bio, avatar_color, created_at)
+     VALUES (?, ?, ?, 'oauth:firebase', ?, ?, ?, ?)`
+  ).run(id, username, displayName, params.firebaseUid, bio, color, now);
+
+  return {
+    id,
+    username,
+    displayName,
+    bio,
+    avatarColor: color,
+    createdAt: now,
+  };
+}
+
+export function findUserByUsername(username: string): (PublicUser & { passwordHash: string }) | null {
+  const clean = normalizeUsername(username);
+  if (!clean) return null;
+  const row = db
+    .prepare(`SELECT * FROM users WHERE LOWER(username) = ?`)
+    .get(clean) as UserRow | undefined;
   if (!row || !row.password_hash) return null;
   return {
     ...mapUser(row),
     passwordHash: row.password_hash,
   };
+}
+
+export function isUsernameAvailable(username: string, excludeUserId?: string): boolean {
+  const clean = normalizeUsername(username);
+  if (!isValidUsername(clean)) return false;
+  const row = excludeUserId
+    ? (db.prepare(`SELECT id FROM users WHERE LOWER(username) = ? AND id != ?`).get(clean, excludeUserId) as
+        | { id: string }
+        | undefined)
+    : (db.prepare(`SELECT id FROM users WHERE LOWER(username) = ?`).get(clean) as { id: string } | undefined);
+  return !row;
 }
 
 export function getUserById(id: string): PublicUser | null {
@@ -169,10 +275,26 @@ export function getUserById(id: string): PublicUser | null {
 
 export function updateUserProfile(
   userId: string,
-  updates: { displayName?: string; bio?: string; avatarColor?: string }
-): PublicUser | null {
+  updates: { username?: string; displayName?: string; bio?: string; avatarColor?: string }
+): { user: PublicUser | null; error?: string; status?: number } {
   const existing = getUserById(userId);
-  if (!existing) return null;
+  if (!existing) return { user: null, error: 'User not found', status: 404 };
+
+  let nextUsername = existing.username;
+  if (typeof updates.username === 'string') {
+    const clean = normalizeUsername(updates.username);
+    if (!isValidUsername(clean)) {
+      return {
+        user: null,
+        error: 'Username must be 3–24 characters using letters, numbers, underscores, dots, or hyphens.',
+        status: 400,
+      };
+    }
+    if (clean !== existing.username.toLowerCase() && !isUsernameAvailable(clean, userId)) {
+      return { user: null, error: 'That username is already taken.', status: 409 };
+    }
+    nextUsername = clean;
+  }
 
   const displayName =
     typeof updates.displayName === 'string' && updates.displayName.trim().length > 0
@@ -184,14 +306,49 @@ export function updateUserProfile(
       ? updates.avatarColor
       : existing.avatarColor;
 
-  db.prepare(`UPDATE users SET display_name = ?, bio = ?, avatar_color = ? WHERE id = ?`).run(
-    displayName,
-    bio,
-    avatarColor,
-    userId
-  );
+  try {
+    db.prepare(`UPDATE users SET username = ?, display_name = ?, bio = ?, avatar_color = ? WHERE id = ?`).run(
+      nextUsername,
+      displayName,
+      bio,
+      avatarColor,
+      userId
+    );
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      'code' in err &&
+      (err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+    ) {
+      return { user: null, error: 'That username is already taken.', status: 409 };
+    }
+    throw err;
+  }
 
-  return getUserById(userId);
+  return { user: getUserById(userId) };
+}
+
+export function updateUserPassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string
+): { ok: boolean; error?: string; status?: number } {
+  const row = db
+    .prepare(`SELECT password_hash FROM users WHERE id = ?`)
+    .get(userId) as { password_hash: string } | undefined;
+  if (!row) return { ok: false, error: 'User not found', status: 404 };
+  if (row.password_hash === 'oauth:firebase') {
+    return { ok: false, error: 'This account uses Google Sign-In instead of a password.', status: 400 };
+  }
+  if (!verifyPassword(currentPassword, row.password_hash)) {
+    return { ok: false, error: 'Current password is incorrect.', status: 401 };
+  }
+  if (newPassword.length < 4 || newPassword.length > 128) {
+    return { ok: false, error: 'New password must be between 4 and 128 characters.', status: 400 };
+  }
+  const nextHash = hashPassword(newPassword);
+  db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(nextHash, userId);
+  return { ok: true };
 }
 
 export function createSession(userId: string): string {
@@ -257,30 +414,36 @@ export function getFriendIds(userId: string): string[] {
   return rows.map((r) => (r.requester_id === userId ? r.addressee_id : r.requester_id));
 }
 
-export function searchUsers(currentUserId: string, query: string): SearchUserItem[] {
-  const trimmed = query.trim().toLowerCase();
+export function searchUsers(
+  currentUserId: string,
+  query: string,
+  onlineUserIds?: Set<string>
+): SearchUserItem[] {
+  const trimmed = normalizeUsername(query);
+  const rawTrimmed = query.trim().toLowerCase();
   let rows: UserRow[];
-  if (trimmed.length === 0) {
+  if (trimmed.length === 0 && rawTrimmed.length === 0) {
     rows = db
       .prepare(
         `SELECT id, username, display_name, bio, avatar_color, created_at
          FROM users
          WHERE id != ?
          ORDER BY created_at DESC
-         LIMIT 15`
+         LIMIT 30`
       )
       .all(currentUserId) as UserRow[];
   } else {
-    const pattern = `%${trimmed}%`;
+    const userPattern = `%${trimmed || rawTrimmed}%`;
+    const namePattern = `%${rawTrimmed}%`;
     rows = db
       .prepare(
         `SELECT id, username, display_name, bio, avatar_color, created_at
          FROM users
          WHERE id != ? AND (LOWER(username) LIKE ? OR LOWER(display_name) LIKE ?)
          ORDER BY CASE WHEN LOWER(username) = ? THEN 0 ELSE 1 END, username ASC
-         LIMIT 20`
+         LIMIT 30`
       )
-      .all(currentUserId, pattern, pattern, trimmed) as UserRow[];
+      .all(currentUserId, userPattern, namePattern, trimmed) as UserRow[];
   }
 
   return rows.map((row) => {
@@ -297,6 +460,7 @@ export function searchUsers(currentUserId: string, query: string): SearchUserIte
     }
     return {
       ...mapUser(row),
+      online: onlineUserIds ? onlineUserIds.has(row.id) : false,
       relationship,
       friendshipId: rel ? rel.id : null,
     };
@@ -312,6 +476,7 @@ interface MessageRow {
   reactions_json: string;
   kind: 'text' | 'call_event';
   read_at: number | null;
+  edited_at: number | null;
   created_at: number;
 }
 
@@ -347,6 +512,7 @@ function hydrateMessage(row: MessageRow): ChatMessage {
     reactions,
     kind: row.kind,
     readAt: row.read_at,
+    editedAt: row.edited_at ?? null,
     createdAt: row.created_at,
   };
 }
@@ -507,6 +673,15 @@ export function toggleMessageReaction(messageId: string, userId: string, emoji: 
   }
 
   db.prepare(`UPDATE messages SET reactions_json = ? WHERE id = ?`).run(JSON.stringify(reactions), messageId);
+  const updated = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(messageId) as MessageRow;
+  return hydrateMessage(updated);
+}
+
+export function editMessageBySender(messageId: string, userId: string, newBody: string): ChatMessage | null {
+  const row = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(messageId) as MessageRow | undefined;
+  if (!row || row.sender_id !== userId || row.kind !== 'text') return null;
+  const now = Date.now();
+  db.prepare(`UPDATE messages SET body = ?, edited_at = ? WHERE id = ?`).run(newBody, now, messageId);
   const updated = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(messageId) as MessageRow;
   return hydrateMessage(updated);
 }

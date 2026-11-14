@@ -1,12 +1,16 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { motion } from 'motion/react';
 import {
+  ArrowDown,
   ArrowLeft,
   Check,
   CheckCheck,
+  Copy,
   Info,
+  Pencil,
   Phone,
   Reply,
+  Search,
   Send,
   Smile,
   Trash2,
@@ -14,8 +18,10 @@ import {
   Video,
   X,
 } from 'lucide-react';
+import { CHATTR_ASSETS } from '../lib/assets.ts';
 import type { CallType, ChatMessage, FriendItem, PublicUser } from '../types.ts';
 import { Avatar } from './Avatar.tsx';
+import { SafeImage } from './SafeImage.tsx';
 
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '🔥', '🎉', '🙏'];
 
@@ -27,6 +33,7 @@ interface ChatViewProps {
   isTyping: boolean;
   onBackMobile: () => void;
   onSendMessage: (body: string, replyToId?: string | null) => Promise<void>;
+  onEditMessage: (messageId: string, body: string) => Promise<void>;
   onReactMessage: (messageId: string, emoji: string) => Promise<void>;
   onDeleteMessage: (messageId: string) => Promise<void>;
   onTypingChange: (typing: boolean) => void;
@@ -66,6 +73,7 @@ export function ChatView({
   isTyping,
   onBackMobile,
   onSendMessage,
+  onEditMessage,
   onReactMessage,
   onDeleteMessage,
   onTypingChange,
@@ -74,24 +82,79 @@ export function ChatView({
 }: ChatViewProps) {
   const [draft, setDraft] = useState('');
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [editingMsg, setEditingMsg] = useState<ChatMessage | null>(null);
+  const [editDraft, setEditDraft] = useState('');
   const [emojiMenuFor, setEmojiMenuFor] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [sending, setSending] = useState(false);
 
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
   const typingTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const prevFriendIdRef = useRef<string>(friend.id);
 
+  // Auto-scroll on initial load or when near bottom
   useEffect(() => {
-    scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollContainerRef.current;
+    const switchedFriend = prevFriendIdRef.current !== friend.id;
+    prevFriendIdRef.current = friend.id;
+    if (switchedFriend) {
+      scrollEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      return;
+    }
+    if (!el) {
+      scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 180) {
+      scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages.length, isTyping, friend.id]);
 
   useEffect(() => {
     setReplyTo(null);
+    setEditingMsg(null);
     setEmojiMenuFor(null);
     setShowComposerEmoji(false);
+    setConfirmRemove(false);
+    setShowSearch(false);
+    setSearchQuery('');
+    setShowScrollBottom(false);
   }, [friend.id]);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(128, Math.max(44, ta.scrollHeight))}px`;
+  }, [draft]);
+
+  function handleScroll() {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBottom(distanceFromBottom > 240);
+  }
+
+  function scrollToMessage(id: string) {
+    const target = document.getElementById(`msg-${id}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedMsgId(id);
+    window.setTimeout(() => {
+      setHighlightedMsgId((cur) => (cur === id ? null : cur));
+    }, 1500);
+  }
 
   function handleDraftChange(val: string) {
     setDraft(val);
@@ -117,9 +180,24 @@ export function ChatView({
       setReplyTo(null);
       setShowComposerEmoji(false);
       textareaRef.current?.focus();
+      window.setTimeout(() => {
+        scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 30);
     } finally {
       setSending(false);
     }
+  }
+
+  async function submitEdit(e: FormEvent) {
+    e.preventDefault();
+    if (!editingMsg) return;
+    const trimmed = editDraft.trim();
+    if (!trimmed || trimmed === editingMsg.body) {
+      setEditingMsg(null);
+      return;
+    }
+    await onEditMessage(editingMsg.id, trimmed);
+    setEditingMsg(null);
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -129,13 +207,27 @@ export function ChatView({
     }
   }
 
+  function handleCopyMessage(msg: ChatMessage) {
+    navigator.clipboard?.writeText(msg.body).catch(() => {});
+    setCopiedId(msg.id);
+    window.setTimeout(() => {
+      setCopiedId((cur) => (cur === msg.id ? null : cur));
+    }, 1500);
+  }
+
+  const displayedMessages = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return messages;
+    return messages.filter((m) => m.body.toLowerCase().includes(q));
+  }, [messages, searchQuery]);
+
   const lastOutgoingId = [...messages]
     .reverse()
     .find((m) => m.senderId === currentUser.id && m.kind === 'text')?.id;
 
   return (
     <div className="flex-1 flex min-w-0 min-h-0 bg-[#FFFFFF]">
-      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         {/* Chat Header */}
         <header className="h-16 px-4 sm:px-6 border-b border-[#E6EBF0] bg-[#FFFFFF] flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
@@ -181,6 +273,22 @@ export function ChatView({
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
+              onClick={() => {
+                setShowSearch((v) => !v);
+                if (showSearch) setSearchQuery('');
+              }}
+              className={`min-w-[40px] min-h-[40px] rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
+                showSearch
+                  ? 'bg-[#7895B2]/15 text-[#7895B2]'
+                  : 'text-[#5D6D7E] hover:bg-[#F4F6F8] hover:text-[#283747]'
+              }`}
+              title="Search messages"
+              aria-label="Search conversation"
+            >
+              <Search className="w-4 h-4" strokeWidth={1.6} />
+            </button>
+            <button
+              type="button"
               onClick={() => onStartCall(friend, 'voice')}
               className="min-w-[40px] min-h-[40px] px-3 rounded-xl bg-[#F4F6F8] hover:bg-[#E8EDF2] text-[#283747] flex items-center gap-1.5 text-xs font-medium transition-colors cursor-pointer"
               title="Start voice call"
@@ -212,8 +320,41 @@ export function ChatView({
           </div>
         </header>
 
+        {/* Collapsible In-Chat Search */}
+        {showSearch && (
+          <div className="px-4 sm:px-6 py-2.5 border-b border-[#E6EBF0] bg-[#F4F6F8] flex items-center gap-2 shrink-0">
+            <Search className="w-4 h-4 text-[#7895B2] shrink-0" strokeWidth={1.6} />
+            <input
+              type="text"
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search in conversation..."
+              className="flex-1 bg-transparent text-sm text-[#283747] placeholder:text-[#94A3B8] focus:outline-none"
+            />
+            {searchQuery && (
+              <span className="font-mono text-xs text-[#5D6D7E] tabular-nums">
+                {displayedMessages.length} found
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setShowSearch(false);
+                setSearchQuery('');
+              }}
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-[#5D6D7E] hover:bg-[#E8EDF2] cursor-pointer"
+              aria-label="Close search"
+            >
+              <X className="w-4 h-4" strokeWidth={1.6} />
+            </button>
+          </div>
+        )}
+
         {/* Messages Timeline */}
         <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
           className="flex-1 overflow-y-auto chat-scroll px-4 sm:px-6 py-5 bg-[#FFFFFF]"
           onClick={() => setEmojiMenuFor(null)}
         >
@@ -224,10 +365,9 @@ export function ChatView({
           ) : messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center px-6">
               <div className="w-56 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] mb-5">
-                <img
-                  src="/src/assets/images/friends_connect_art_1794565021200.jpg"
+                <SafeImage
+                  src={CHATTR_ASSETS.friendsConnectArt}
                   alt="Connected friends illustration"
-                  referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"
                 />
               </div>
@@ -256,10 +396,14 @@ export function ChatView({
                 </button>
               </div>
             </div>
+          ) : displayedMessages.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-center px-6 text-sm text-[#5D6D7E]">
+              No messages matched &ldquo;{searchQuery.trim()}&rdquo;.
+            </div>
           ) : (
-            messages.map((msg, idx) => {
-              const prev = idx > 0 ? messages[idx - 1] : null;
-              const next = idx < messages.length - 1 ? messages[idx + 1] : null;
+            displayedMessages.map((msg, idx) => {
+              const prev = idx > 0 ? displayedMessages[idx - 1] : null;
+              const next = idx < displayedMessages.length - 1 ? displayedMessages[idx + 1] : null;
 
               const showDayDivider =
                 !prev ||
@@ -267,7 +411,7 @@ export function ChatView({
 
               if (msg.kind === 'call_event') {
                 return (
-                  <div key={msg.id} className="my-3.5">
+                  <div key={msg.id} id={`msg-${msg.id}`} className="my-3.5">
                     {showDayDivider && (
                       <div className="flex items-center justify-center my-4">
                         <span className="text-[11px] font-medium text-[#94A3B8]">
@@ -288,6 +432,7 @@ export function ChatView({
               }
 
               const isMine = msg.senderId === currentUser.id;
+              const isEditingThis = editingMsg?.id === msg.id;
               const groupedWithPrev =
                 Boolean(prev) &&
                 prev!.kind === 'text' &&
@@ -307,7 +452,10 @@ export function ChatView({
               );
 
               const showTimestamp =
-                !groupedWithNext || msg.id === lastOutgoingId || reactionEntries.length > 0;
+                !groupedWithNext ||
+                msg.id === lastOutgoingId ||
+                reactionEntries.length > 0 ||
+                Boolean(msg.editedAt);
 
               const bubbleRadiusClass = isMine
                 ? `${groupedWithPrev ? 'rounded-tr-lg' : 'rounded-tr-2xl'} ${
@@ -318,7 +466,13 @@ export function ChatView({
                   } rounded-r-2xl`;
 
               return (
-                <div key={msg.id} className={groupedWithPrev ? 'mt-1' : 'mt-3.5'}>
+                <div
+                  key={msg.id}
+                  id={`msg-${msg.id}`}
+                  className={`${groupedWithPrev ? 'mt-1' : 'mt-3.5'} rounded-xl transition-colors duration-300 ${
+                    highlightedMsgId === msg.id ? 'bg-[#7895B2]/10 -mx-2 px-2 py-1' : ''
+                  }`}
+                >
                   {showDayDivider && (
                     <div className="flex items-center justify-center my-4">
                       <span className="text-[11px] font-medium text-[#94A3B8]">
@@ -333,104 +487,170 @@ export function ChatView({
                     transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                     className={`group flex flex-col ${isMine ? 'items-end' : 'items-start'}`}
                   >
-                    <div
-                      className={`relative flex items-end gap-1.5 max-w-[85%] sm:max-w-[70%] ${
-                        isMine ? 'flex-row-reverse' : 'flex-row'
-                      }`}
-                    >
-                      <div
-                        className={`${bubbleRadiusClass} px-4 py-2.5 text-sm leading-relaxed break-words ${
-                          isMine
-                            ? 'bg-[#7895B2] text-white'
-                            : 'bg-[#F4F6F8] text-[#283747]'
-                        }`}
+                    {isEditingThis ? (
+                      <form
+                        onSubmit={submitEdit}
+                        className="w-full max-w-md bg-[#F4F6F8] border border-[#7895B2] rounded-2xl p-2.5 space-y-2"
                       >
-                        {msg.replyTo && (
-                          <div
-                            className={`mb-2 px-2.5 py-1.5 rounded-xl text-xs ${
-                              isMine
-                                ? 'bg-white/15 text-white/95'
-                                : 'bg-[#FFFFFF] border border-[#E6EBF0] text-[#5D6D7E]'
-                            }`}
-                          >
-                            <div className="font-medium opacity-90">
-                              {msg.replyTo.senderId === currentUser.id
-                                ? 'You'
-                                : friend.displayName}
-                            </div>
-                            <div className="truncate">{msg.replyTo.body}</div>
-                          </div>
-                        )}
-                        <div className="whitespace-pre-wrap">{msg.body}</div>
-                      </div>
-
-                      {/* Message hover actions */}
-                      <div
-                        className={`opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 shrink-0 ${
-                          emojiMenuFor === msg.id ? 'opacity-100' : ''
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEmojiMenuFor((cur) => (cur === msg.id ? null : msg.id));
+                        <textarea
+                          rows={2}
+                          autoFocus
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') setEditingMsg(null);
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              void submitEdit(e as unknown as FormEvent);
+                            }
                           }}
-                          className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
-                          title="React"
-                          aria-label="Add reaction"
-                        >
-                          <Smile className="w-4 h-4" strokeWidth={1.6} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setReplyTo(msg);
-                            textareaRef.current?.focus();
-                          }}
-                          className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
-                          title="Reply"
-                          aria-label="Reply to message"
-                        >
-                          <Reply className="w-4 h-4" strokeWidth={1.6} />
-                        </button>
-                        {isMine && (
+                          className="w-full bg-[#FFFFFF] border border-[#E6EBF0] rounded-xl px-3 py-2 text-sm text-[#283747] focus:outline-none focus:border-[#7895B2] resize-none"
+                        />
+                        <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
-                            onClick={() => onDeleteMessage(msg.id)}
-                            className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-red-600 hover:bg-red-50 cursor-pointer"
-                            title="Delete message"
-                            aria-label="Delete message"
+                            onClick={() => setEditingMsg(null)}
+                            className="px-3 py-1 rounded-lg text-xs font-medium text-[#5D6D7E] hover:bg-[#E8EDF2] cursor-pointer"
                           >
-                            <Trash2 className="w-4 h-4" strokeWidth={1.6} />
+                            Cancel
                           </button>
-                        )}
-                      </div>
-
-                      {/* Quick reaction popover */}
-                      {emojiMenuFor === msg.id && (
+                          <button
+                            type="submit"
+                            className="px-3 py-1 rounded-lg text-xs font-medium bg-[#7895B2] hover:bg-[#6684A2] text-white cursor-pointer"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div
+                        className={`relative flex items-end gap-1.5 max-w-[85%] sm:max-w-[70%] ${
+                          isMine ? 'flex-row-reverse' : 'flex-row'
+                        }`}
+                      >
                         <div
-                          onClick={(e) => e.stopPropagation()}
-                          className={`absolute -top-11 z-20 bg-[#FFFFFF] border border-[#E6EBF0] rounded-xl shadow-[0_2px_8px_rgba(40,55,71,0.08)] px-1.5 py-1 flex items-center gap-1 ${
-                            isMine ? 'right-0' : 'left-0'
+                          className={`${bubbleRadiusClass} px-4 py-2.5 text-sm leading-relaxed break-words ${
+                            isMine
+                              ? 'bg-[#7895B2] text-white'
+                              : 'bg-[#F4F6F8] text-[#283747]'
                           }`}
                         >
-                          {QUICK_EMOJIS.map((em) => (
+                          {msg.replyTo && (
                             <button
-                              key={em}
                               type="button"
-                              onClick={() => {
-                                void onReactMessage(msg.id, em);
-                                setEmojiMenuFor(null);
-                              }}
-                              className="w-8 h-8 rounded-lg hover:bg-[#F4F6F8] flex items-center justify-center text-base cursor-pointer"
+                              onClick={() => scrollToMessage(msg.replyTo!.id)}
+                              className={`w-full text-left mb-2 px-2.5 py-1.5 rounded-xl text-xs transition-opacity hover:opacity-90 cursor-pointer ${
+                                isMine
+                                  ? 'bg-white/15 text-white/95'
+                                  : 'bg-[#FFFFFF] border border-[#E6EBF0] text-[#5D6D7E]'
+                              }`}
                             >
-                              {em}
+                              <div className="font-medium opacity-90">
+                                {msg.replyTo.senderId === currentUser.id
+                                  ? 'You'
+                                  : friend.displayName}
+                              </div>
+                              <div className="truncate">{msg.replyTo.body}</div>
                             </button>
-                          ))}
+                          )}
+                          <div className="whitespace-pre-wrap">{msg.body}</div>
                         </div>
-                      )}
-                    </div>
+
+                        {/* Message hover actions */}
+                        <div
+                          className={`opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex items-center gap-0.5 shrink-0 ${
+                            emojiMenuFor === msg.id ? 'opacity-100' : ''
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEmojiMenuFor((cur) => (cur === msg.id ? null : msg.id));
+                            }}
+                            className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
+                            title="React"
+                            aria-label="Add reaction"
+                          >
+                            <Smile className="w-4 h-4" strokeWidth={1.6} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReplyTo(msg);
+                              textareaRef.current?.focus();
+                            }}
+                            className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
+                            title="Reply"
+                            aria-label="Reply to message"
+                          >
+                            <Reply className="w-4 h-4" strokeWidth={1.6} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyMessage(msg)}
+                            className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
+                            title="Copy text"
+                            aria-label="Copy message"
+                          >
+                            {copiedId === msg.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" strokeWidth={1.7} />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" strokeWidth={1.6} />
+                            )}
+                          </button>
+                          {isMine && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingMsg(msg);
+                                  setEditDraft(msg.body);
+                                }}
+                                className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-[#283747] hover:bg-[#F4F6F8] cursor-pointer"
+                                title="Edit message"
+                                aria-label="Edit message"
+                              >
+                                <Pencil className="w-3.5 h-3.5" strokeWidth={1.6} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onDeleteMessage(msg.id)}
+                                className="w-8 h-8 rounded-xl flex items-center justify-center text-[#94A3B8] hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                                title="Delete message"
+                                aria-label="Delete message"
+                              >
+                                <Trash2 className="w-4 h-4" strokeWidth={1.6} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Quick reaction popover */}
+                        {emojiMenuFor === msg.id && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className={`absolute -top-11 z-20 bg-[#FFFFFF] border border-[#E6EBF0] rounded-xl shadow-[0_2px_8px_rgba(40,55,71,0.08)] px-1.5 py-1 flex items-center gap-1 ${
+                              isMine ? 'right-0' : 'left-0'
+                            }`}
+                          >
+                            {QUICK_EMOJIS.map((em) => (
+                              <button
+                                key={em}
+                                type="button"
+                                onClick={() => {
+                                  void onReactMessage(msg.id, em);
+                                  setEmojiMenuFor(null);
+                                }}
+                                className="w-8 h-8 rounded-lg hover:bg-[#F4F6F8] flex items-center justify-center text-base cursor-pointer"
+                              >
+                                {em}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Reactions row */}
                     {reactionEntries.length > 0 && (
@@ -460,6 +680,12 @@ export function ChatView({
                     {showTimestamp && (
                       <div className="flex items-center gap-1 mt-1 text-[11px] text-[#94A3B8] tabular-nums">
                         <span>{formatMessageTime(msg.createdAt)}</span>
+                        {msg.editedAt && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>Edited</span>
+                          </>
+                        )}
                         {isMine && msg.id === lastOutgoingId && (
                           <>
                             <span aria-hidden="true">·</span>
@@ -496,6 +722,19 @@ export function ChatView({
 
           <div ref={scrollEndRef} />
         </div>
+
+        {/* Scroll-to-bottom Floating Button */}
+        {showScrollBottom && (
+          <button
+            type="button"
+            onClick={() => scrollEndRef.current?.scrollIntoView({ behavior: 'smooth' })}
+            className="absolute bottom-20 right-6 z-10 w-10 h-10 rounded-full bg-[#FFFFFF] border border-[#E6EBF0] shadow-[0_4px_12px_rgba(40,55,71,0.08)] flex items-center justify-center text-[#7895B2] hover:bg-[#F4F6F8] transition-colors cursor-pointer"
+            title="Jump to latest"
+            aria-label="Scroll to latest messages"
+          >
+            <ArrowDown className="w-4 h-4" strokeWidth={1.7} />
+          </button>
+        )}
 
         {/* Message Composer */}
         <footer className="border-t border-[#E6EBF0] bg-[#FFFFFF] px-4 sm:px-6 py-3 shrink-0">
@@ -623,14 +862,38 @@ export function ChatView({
           </div>
 
           <div className="mt-auto pt-4">
-            <button
-              type="button"
-              onClick={() => onRemoveFriend(friend.id)}
-              className="w-full h-10 px-3.5 rounded-xl text-xs font-medium text-red-600 hover:bg-red-50 flex items-center justify-center gap-2 transition-colors cursor-pointer"
-            >
-              <UserMinus className="w-4 h-4" strokeWidth={1.6} />
-              <span>Remove Friend</span>
-            </button>
+            {confirmRemove ? (
+              <div className="space-y-2">
+                <p className="text-xs text-[#5D6D7E] text-center">
+                  Remove @{friend.username} from your friends?
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRemove(false)}
+                    className="h-9 rounded-xl bg-[#FFFFFF] border border-[#E6EBF0] text-xs font-medium text-[#5D6D7E] hover:bg-[#F4F6F8] cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onRemoveFriend(friend.id)}
+                    className="h-9 rounded-xl bg-red-600 hover:bg-red-700 text-xs font-medium text-white cursor-pointer"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmRemove(true)}
+                className="w-full h-10 px-3.5 rounded-xl text-xs font-medium text-red-600 hover:bg-red-50 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <UserMinus className="w-4 h-4" strokeWidth={1.6} />
+                <span>Remove Friend</span>
+              </button>
+            )}
           </div>
         </aside>
       )}

@@ -7,6 +7,7 @@ export interface PublicUser {
   createdAt: number;
   online?: boolean;
   inCall?: boolean;
+  authProvider?: 'local' | 'google';
 }
 
 export interface FriendItem extends PublicUser {
@@ -44,6 +45,7 @@ export interface ChatMessage {
   reactions: Record<string, string[]>;
   kind: 'text' | 'call_event';
   readAt: number | null;
+  editedAt?: number | null;
   createdAt: number;
 }
 
