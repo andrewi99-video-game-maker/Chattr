@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface TurnstileApi {
   render: (
@@ -34,10 +34,12 @@ export function CloudflareTurnstile({ siteKey, resetSignal = 0, onToken }: Cloud
   const widgetIdRef = useRef<string | null>(null);
   const onTokenRef = useRef(onToken);
   onTokenRef.current = onToken;
+  const [widgetError, setWidgetError] = useState(false);
 
   useEffect(() => {
     if (!siteKey) return;
     let cancelled = false;
+    setWidgetError(false);
 
     function renderWidget() {
       if (cancelled || !containerRef.current || !window.turnstile || !siteKey) return;
@@ -52,9 +54,15 @@ export function CloudflareTurnstile({ siteKey, resetSignal = 0, onToken }: Cloud
       widgetIdRef.current = window.turnstile.render(containerRef.current, {
         sitekey: siteKey,
         theme: 'light',
-        callback: (token: string) => onTokenRef.current(token),
+        callback: (token: string) => {
+          setWidgetError(false);
+          onTokenRef.current(token);
+        },
         'expired-callback': () => onTokenRef.current(null),
-        'error-callback': () => onTokenRef.current(null),
+        'error-callback': () => {
+          setWidgetError(true);
+          onTokenRef.current(null);
+        },
       });
     }
 
@@ -102,6 +110,7 @@ export function CloudflareTurnstile({ siteKey, resetSignal = 0, onToken }: Cloud
   useEffect(() => {
     if (resetSignal > 0 && widgetIdRef.current && window.turnstile) {
       try {
+        setWidgetError(false);
         window.turnstile.reset(widgetIdRef.current);
       } catch {
         // ignore
@@ -113,8 +122,13 @@ export function CloudflareTurnstile({ siteKey, resetSignal = 0, onToken }: Cloud
   if (!siteKey) return null;
 
   return (
-    <div className="pt-1 flex justify-center">
+    <div className="pt-1 flex flex-col items-center gap-1.5">
       <div ref={containerRef} />
+      {widgetError && (
+        <p className="text-xs text-red-600 text-center">
+          Security widget failed to load. Confirm this domain is listed in Cloudflare Turnstile Hostname Management.
+        </p>
+      )}
     </div>
   );
 }

@@ -57,9 +57,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
   const [googleLoading, setGoogleLoading] = useState(false);
   const [pendingGoogle, setPendingGoogle] = useState<PendingGoogleSetup | null>(null);
 
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(
-    () => (import.meta.env.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY || '').trim() || null
-  );
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileReset, setTurnstileReset] = useState(0);
 
@@ -77,9 +75,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { turnstileEnabled?: boolean; siteKey?: string | null } | null) => {
         if (!active || !data) return;
-        if (data.turnstileEnabled && data.siteKey) {
-          setTurnstileSiteKey(data.siteKey);
-        }
+        setTurnstileSiteKey(data.turnstileEnabled && data.siteKey ? data.siteKey : null);
       })
       .catch(() => {});
     return () => {
