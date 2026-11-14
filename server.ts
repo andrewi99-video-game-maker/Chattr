@@ -324,7 +324,7 @@ async function startServer() {
   });
 
   app.post('/api/auth/firebase', authLimiter, async (req, res) => {
-    const { idToken, username, displayName, bio, avatarColor, turnstileToken } = req.body || {};
+    const { idToken, username, displayName, bio, avatarColor } = req.body || {};
     if (typeof idToken !== 'string' || !idToken.trim()) {
       res.status(400).json({ error: 'Firebase ID token is required.' });
       return;
@@ -362,13 +362,8 @@ async function startServer() {
       return;
     }
 
-    // First-time Google user: enforce Turnstile only on initial sign-in if not yet onboarding
+    // First-time Google user: proceed directly to unique @username setup
     if (typeof username !== 'string' || !username.trim()) {
-      const cfCheck = await verifyTurnstileToken(turnstileToken, getClientIp(req));
-      if (!cfCheck.ok) {
-        res.status(403).json({ error: cfCheck.error });
-        return;
-      }
       res.json({
         needsUsernameSetup: true,
         firebaseUid: verified.uid,

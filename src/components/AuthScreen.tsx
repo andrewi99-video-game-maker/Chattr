@@ -53,6 +53,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorSource, setErrorSource] = useState<'google' | 'form'>('form');
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [pendingGoogle, setPendingGoogle] = useState<PendingGoogleSetup | null>(null);
@@ -154,6 +155,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setErrorSource('form');
 
     if (!USERNAME_REGEX.test(normalizedUsername)) {
       setError('Username must be 3–24 characters using letters, numbers, underscores, dots, or hyphens.');
@@ -206,10 +208,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
 
   async function handleGoogleSignIn() {
     setError(null);
-    if (turnstileSiteKey && !turnstileToken) {
-      setError('Please complete the Cloudflare security check first.');
-      return;
-    }
+    setErrorSource('google');
     setGoogleLoading(true);
     try {
       const cred = await signInWithPopup(auth, googleProvider);
@@ -226,7 +225,6 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
         method: 'POST',
         body: JSON.stringify({
           idToken,
-          turnstileToken,
           ...(existingProfile
             ? {
                 username: existingProfile.username,
@@ -262,11 +260,24 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
         onAuthenticated({ ...bridgeRes.user, authProvider: 'google' }, bridgeRes.token, 'firebase');
       }
     } catch (err) {
-      if (turnstileSiteKey) setTurnstileReset((v) => v + 1);
+      const fbCode =
+        err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : '';
       if (err instanceof ApiError) {
         setError(err.message);
-      } else if (err instanceof Error && err.message.includes('popup-closed-by-user')) {
-        setError('Google sign-in popup was closed.');
+      } else if (fbCode === 'auth/unauthorized-domain') {
+        setError(
+          `Google Sign-In is not authorized for "${window.location.hostname}" yet. Add this domain in Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+      } else if (fbCode === 'auth/operation-not-allowed') {
+        setError(
+          'Google Sign-In is disabled in Firebase Console. Enable Google under Authentication → Sign-in method.'
+        );
+      } else if (fbCode === 'auth/popup-blocked') {
+        setError('Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.');
+      } else if (fbCode === 'auth/popup-closed-by-user' || fbCode === 'auth/cancelled-popup-request') {
+        setError('Google sign-in popup was closed before finishing.');
+      } else if (fbCode === 'auth/network-request-failed') {
+        setError('Network error while connecting to Google Sign-In. Please check your connection and retry.');
       } else if (err instanceof Error) {
         setError(err.message);
       } else {
@@ -324,10 +335,16 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
       setLastUsername(bridgeRes.user.username);
       onAuthenticated({ ...bridgeRes.user, authProvider: 'google' }, bridgeRes.token, 'firebase');
     } catch (err) {
+      setErrorSource('form');
       if (err instanceof ApiError) {
         setError(err.message);
       } else if (err instanceof Error) {
-        setError(err.message);
+        try {
+          const parsed = JSON.parse(err.message) as { error?: string };
+          setError(parsed.error || err.message);
+        } catch {
+          setError(err.message);
+        }
       } else {
         setError('Could not save your username. Please try again.');
       }
@@ -596,6 +613,15 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
                   <span>{googleLoading ? 'Connecting to Google...' : 'Continue with Google'}</span>
                 </button>
 
+                {error && errorSource === 'google' && (
+                  <div
+                    role="alert"
+                    className="mt-3 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 leading-relaxed"
+                  >
+                    {error}
+                  </div>
+                )}
+
                 <div className="relative my-5">
                   <div className="absolute inset-0 flex items-center">
                     <div className="w-full border-t border-[#E6EBF0]" />
@@ -721,7 +747,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
                     onToken={setTurnstileToken}
                   />
 
-                  {error && (
+                  {error && errorSource === 'form' && (
                     <div
                       role="alert"
                       className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700"
