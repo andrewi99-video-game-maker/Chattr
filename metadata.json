@@ -1,0 +1,11 @@
+{
+  "name": "Chattr",
+  "description": "Direct texting and voice/video calling with username accounts and friend connections.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
