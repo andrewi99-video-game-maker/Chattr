@@ -83,9 +83,9 @@ export function CallsView({ calls, onlineMap, onStartCall, onOpenChat }: CallsVi
       <div className="flex-1 overflow-y-auto chat-scroll">
         {filteredCalls.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-8 text-center">
-            <div className="w-56 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] mb-5">
+            <div className="w-64 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] shadow-[0_6px_20px_rgba(40,55,71,0.06)] mb-6">
               <SafeImage
-                src={CHATTR_ASSETS.emptyChatArtwork}
+                src={CHATTR_ASSETS.callsEmptyArt}
                 alt="Voice and video calling artwork"
                 className="w-full h-full object-cover"
               />

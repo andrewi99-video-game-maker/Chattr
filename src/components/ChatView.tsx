@@ -12,6 +12,7 @@ import {
   Reply,
   Search,
   Send,
+  ShieldCheck,
   Smile,
   Trash2,
   UserMinus,
@@ -355,7 +356,7 @@ export function ChatView({
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto chat-scroll px-4 sm:px-6 py-5 bg-[#FFFFFF]"
+          className="flex-1 overflow-y-auto chat-scroll chat-canvas-bg px-4 sm:px-6 py-5"
           onClick={() => setEmojiMenuFor(null)}
         >
           {loading ? (
@@ -411,16 +412,18 @@ export function ChatView({
 
               if (msg.kind === 'call_event') {
                 return (
-                  <div key={msg.id} id={`msg-${msg.id}`} className="my-3.5">
+                  <div key={msg.id} id={`msg-${msg.id}`} className="my-4">
                     {showDayDivider && (
-                      <div className="flex items-center justify-center my-4">
-                        <span className="text-[11px] font-medium text-[#94A3B8]">
+                      <div className="flex items-center gap-3 my-5">
+                        <div className="flex-1 h-px bg-[#E6EBF0]" />
+                        <span className="text-[11px] font-medium text-[#64748B]">
                           {formatDayDivider(msg.createdAt)}
                         </span>
+                        <div className="flex-1 h-px bg-[#E6EBF0]" />
                       </div>
                     )}
                     <div className="flex items-center justify-center">
-                      <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#F4F6F8] border border-[#E6EBF0] text-xs text-[#5D6D7E] tabular-nums">
+                      <div className="inline-flex items-center gap-2 py-1 text-xs text-[#5D6D7E] tabular-nums">
                         <Phone className="w-3.5 h-3.5 text-[#7895B2]" strokeWidth={1.6} />
                         <span>{msg.body}</span>
                         <span aria-hidden="true">·</span>
@@ -474,10 +477,12 @@ export function ChatView({
                   }`}
                 >
                   {showDayDivider && (
-                    <div className="flex items-center justify-center my-4">
-                      <span className="text-[11px] font-medium text-[#94A3B8]">
+                    <div className="flex items-center gap-3 my-5">
+                      <div className="flex-1 h-px bg-[#E6EBF0]" />
+                      <span className="text-[11px] font-medium text-[#64748B]">
                         {formatDayDivider(msg.createdAt)}
                       </span>
+                      <div className="flex-1 h-px bg-[#E6EBF0]" />
                     </div>
                   )}
 
@@ -531,8 +536,8 @@ export function ChatView({
                         <div
                           className={`${bubbleRadiusClass} px-4 py-2.5 text-sm leading-relaxed break-words ${
                             isMine
-                              ? 'bg-[#7895B2] text-white'
-                              : 'bg-[#F4F6F8] text-[#283747]'
+                              ? 'bg-[#7895B2] text-white shadow-[0_1px_3px_rgba(40,55,71,0.12)]'
+                              : 'bg-[#FFFFFF] text-[#283747] border border-[#E6EBF0] shadow-[0_1px_2px_rgba(40,55,71,0.04)]'
                           }`}
                         >
                           {msg.replyTo && (
@@ -712,7 +717,7 @@ export function ChatView({
 
           {isTyping && (
             <div className="flex items-start mt-3">
-              <div className="bg-[#F4F6F8] rounded-2xl rounded-bl-sm px-4 py-3 flex items-center gap-1.5">
+              <div className="bg-[#FFFFFF] border border-[#E6EBF0] shadow-[0_1px_2px_rgba(40,55,71,0.04)] rounded-2xl rounded-bl-sm px-4 py-3 flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#7895B2] animate-bounce [animation-delay:0ms]" />
                 <span className="w-1.5 h-1.5 rounded-full bg-[#7895B2] animate-bounce [animation-delay:150ms]" />
                 <span className="w-1.5 h-1.5 rounded-full bg-[#7895B2] animate-bounce [animation-delay:300ms]" />
@@ -859,6 +864,16 @@ export function ChatView({
               <Video className="w-4 h-4" strokeWidth={1.6} />
               <span>Start Video Call</span>
             </button>
+          </div>
+
+          <div className="py-4 text-xs text-[#5D6D7E] space-y-1.5">
+            <div className="flex items-center gap-1.5 font-medium text-[#283747]">
+              <ShieldCheck className="w-4 h-4 text-[#7895B2] shrink-0" strokeWidth={1.6} />
+              <span>Connection Privacy</span>
+            </div>
+            <p className="leading-relaxed">
+              Messages travel over HTTPS/WSS with friend-only access control. Voice and video calls use direct WebRTC DTLS-SRTP media encryption.
+            </p>
           </div>
 
           <div className="mt-auto pt-4">

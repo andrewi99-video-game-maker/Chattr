@@ -386,7 +386,7 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
             </p>
           </div>
 
-          <div className="rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8]">
+          <div className="rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] shadow-[0_8px_28px_rgba(40,55,71,0.06)]">
             <div className="aspect-[16/9] overflow-hidden bg-[#F4F6F8]">
               <SafeImage
                 src={CHATTR_ASSETS.authStudioScene}
@@ -746,6 +746,12 @@ export function AuthScreen({ sessionNotice, onAuthenticated }: AuthScreenProps) 
                     resetSignal={turnstileReset}
                     onToken={setTurnstileToken}
                   />
+
+                  {turnstileSiteKey && (
+                    <p className="text-[11px] text-[#64748B] text-center leading-relaxed">
+                      Cloudflare verifies human sign-ins against bots. Chats &amp; calls use HTTPS/WSS and peer-to-peer DTLS-SRTP media encryption.
+                    </p>
+                  )}
 
                   {error && errorSource === 'form' && (
                     <div

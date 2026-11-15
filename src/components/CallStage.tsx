@@ -12,8 +12,10 @@ import {
   VideoOff,
   Volume2,
 } from 'lucide-react';
+import { CHATTR_ASSETS } from '../lib/assets.ts';
 import type { ActiveCallSession, CallType, PublicUser } from '../types.ts';
 import { Avatar } from './Avatar.tsx';
+import { SafeImage } from './SafeImage.tsx';
 
 interface IncomingCallData {
   callId: string;
@@ -122,7 +124,7 @@ function AudioWaveVisualizer({
       {levels.map((lvl, idx) => (
         <span
           key={idx}
-          className="w-1 h-10 rounded-full bg-[#7895B2] origin-center transition-transform duration-75"
+          className="w-1 h-10 rounded-full bg-[#A8C1DA] origin-center transition-transform duration-75"
           style={{ transform: `scaleY(${lvl.toFixed(3)})` }}
         />
       ))}
@@ -341,7 +343,7 @@ export function CallStage({
                     <span aria-hidden="true">·</span>
                     <span className="inline-flex items-center gap-1 text-emerald-600">
                       <Shield className="w-3 h-3" strokeWidth={1.6} />
-                      <span>Peer-to-Peer</span>
+                      <span>Peer-to-Peer · DTLS-SRTP</span>
                     </span>
                   </>
                 )}
@@ -366,11 +368,7 @@ export function CallStage({
           )}
 
           {/* Video / Voice Stage */}
-          <div
-            className={`relative h-[340px] sm:h-[420px] flex items-center justify-center overflow-hidden ${
-              hasRemoteVideo ? 'bg-[#283747]' : 'bg-[#F4F6F8]'
-            }`}
-          >
+          <div className="relative h-[340px] sm:h-[420px] flex items-center justify-center overflow-hidden bg-[#1F2D3B]">
             {hasRemoteVideo ? (
               <video
                 ref={remoteVideoRef}
@@ -379,35 +377,46 @@ export function CallStage({
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="relative flex flex-col items-center text-center px-6">
-                <div className="p-2 rounded-full bg-[#FFFFFF] border border-[#E6EBF0]">
-                  <Avatar
-                    name={activeCall.peer.displayName}
-                    color={activeCall.peer.avatarColor}
-                    size="xl"
+              <>
+                <div className="absolute inset-0 pointer-events-none select-none">
+                  <SafeImage
+                    src={CHATTR_ASSETS.callStageBackdrop}
+                    alt=""
+                    className="w-full h-full object-cover opacity-40"
                   />
-                </div>
-                <div className="font-display text-xl font-semibold mt-4 text-[#283747]">
-                  {activeCall.peer.displayName}
-                </div>
-                <div className="text-sm text-[#5D6D7E] mt-1 tabular-nums">
-                  {activeCall.phase === 'connected'
-                    ? activeCall.peerAudioEnabled
-                      ? 'Voice connected'
-                      : 'Peer microphone muted'
-                    : activeCall.phase === 'ringing'
-                    ? 'Waiting for answer...'
-                    : 'Establishing peer connection...'}
+                  <div className="absolute inset-0 bg-gradient-to-b from-[#1F2D3B]/75 via-[#283747]/70 to-[#18222C]/90" />
                 </div>
 
-                <div className="mt-5">
-                  <AudioWaveVisualizer
-                    remoteStream={remoteStream}
-                    localStream={localStream}
-                    active={activeCall.phase === 'connected'}
-                  />
+                <div className="relative z-10 flex flex-col items-center text-center px-6">
+                  <div className="p-2 rounded-full bg-white/10 ring-1 ring-white/20 backdrop-blur-xs">
+                    <Avatar
+                      name={activeCall.peer.displayName}
+                      color={activeCall.peer.avatarColor}
+                      size="xl"
+                    />
+                  </div>
+                  <div className="font-display text-xl font-semibold mt-4 text-white">
+                    {activeCall.peer.displayName}
+                  </div>
+                  <div className="text-sm text-[#CBD5E1] mt-1 tabular-nums">
+                    {activeCall.phase === 'connected'
+                      ? activeCall.peerAudioEnabled
+                        ? 'Voice connected'
+                        : 'Peer microphone muted'
+                      : activeCall.phase === 'ringing'
+                      ? 'Waiting for answer...'
+                      : 'Establishing peer connection...'}
+                  </div>
+
+                  <div className="mt-5">
+                    <AudioWaveVisualizer
+                      remoteStream={remoteStream}
+                      localStream={localStream}
+                      active={activeCall.phase === 'connected'}
+                    />
+                  </div>
                 </div>
-              </div>
+              </>
             )}
 
             {/* Local self-preview when video is enabled */}

@@ -42,8 +42,11 @@ export function Avatar({
   return (
     <div className="relative inline-flex shrink-0 select-none">
       <div
-        className={`${SIZE_CLASSES[size]} flex items-center justify-center font-display font-medium text-white tracking-tight`}
-        style={{ backgroundColor: baseColor }}
+        className={`${SIZE_CLASSES[size]} flex items-center justify-center font-display font-medium text-white tracking-tight ring-1 ring-inset ring-black/10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.22)]`}
+        style={{
+          backgroundColor: baseColor,
+          backgroundImage: 'linear-gradient(145deg, rgba(255,255,255,0.16) 0%, rgba(0,0,0,0.08) 100%)',
+        }}
         aria-hidden="true"
       >
         {getInitials(name)}

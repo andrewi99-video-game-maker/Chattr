@@ -330,9 +330,15 @@ export function ProfileModal({ user, authMode, onClose, onUpdated, onLogout }: P
 
           {/* Collapsible Password Update (for username+password accounts) */}
           {authMode === 'firebase' ? (
-            <div className="border-t border-[#E6EBF0] pt-4 text-xs text-[#5D6D7E] flex items-center justify-between">
-              <span>Account authentication</span>
-              <span className="font-medium text-[#283747]">Google Sign-In</span>
+            <div className="border-t border-[#E6EBF0] pt-4 space-y-2 text-xs text-[#5D6D7E]">
+              <div className="flex items-center justify-between">
+                <span>Account authentication</span>
+                <span className="font-medium text-[#283747]">Google Sign-In</span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span>Calls &amp; transport</span>
+                <span className="font-medium text-[#283747] text-right">HTTPS/WSS · WebRTC DTLS-SRTP</span>
+              </div>
             </div>
           ) : (
             <div className="border-t border-[#E6EBF0] pt-4">

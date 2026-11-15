@@ -1411,7 +1411,7 @@ export default function App() {
             onClick={() => setTab('messages')}
             className={`relative w-12 h-12 rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
               tab === 'messages'
-                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0]'
+                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0] shadow-[0_1px_3px_rgba(40,55,71,0.06)]'
                 : 'text-[#5D6D7E] hover:text-[#283747] hover:bg-[#FFFFFF]/70'
             }`}
             title="Messages"
@@ -1430,7 +1430,7 @@ export default function App() {
             onClick={() => setTab('friends')}
             className={`relative w-12 h-12 rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
               tab === 'friends'
-                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0]'
+                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0] shadow-[0_1px_3px_rgba(40,55,71,0.06)]'
                 : 'text-[#5D6D7E] hover:text-[#283747] hover:bg-[#FFFFFF]/70'
             }`}
             title="Friends & Add People"
@@ -1449,7 +1449,7 @@ export default function App() {
             onClick={() => setTab('calls')}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
               tab === 'calls'
-                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0]'
+                ? 'bg-[#FFFFFF] text-[#7895B2] border border-[#E6EBF0] shadow-[0_1px_3px_rgba(40,55,71,0.06)]'
                 : 'text-[#5D6D7E] hover:text-[#283747] hover:bg-[#FFFFFF]/70'
             }`}
             title="Call History"
@@ -1565,7 +1565,7 @@ export default function App() {
                   type="button"
                   onClick={() => handleOpenChat(friend.id)}
                   className={`w-full px-3 py-2.5 rounded-xl flex items-center gap-3 text-left transition-colors cursor-pointer ${
-                    isSelected ? 'bg-[#F4F6F8]' : 'hover:bg-[#F4F6F8]/60'
+                    isSelected ? 'bg-[#7895B2]/12' : 'hover:bg-[#F4F6F8]/80'
                   }`}
                 >
                   <Avatar
@@ -1678,8 +1678,8 @@ export default function App() {
             onRemoveFriend={handleRemoveFriend}
           />
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center bg-[#FFFFFF] p-8 text-center">
-            <div className="w-72 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#F4F6F8] mb-6">
+          <div className="flex-1 flex flex-col items-center justify-center chat-canvas-bg p-8 text-center">
+            <div className="w-72 sm:w-80 aspect-[4/3] rounded-2xl overflow-hidden border border-[#E6EBF0] bg-[#FFFFFF] shadow-[0_8px_24px_rgba(40,55,71,0.06)] mb-6">
               <SafeImage
                 src={CHATTR_ASSETS.emptyChatArtwork}
                 alt="Chattr clean messaging illustration"
